@@ -93,7 +93,11 @@ public final class PeerHandshake {
             if (!parsed.isJsonObject()) {
                 throw new IOException("Peer handshake message must be a JSON object");
             }
-            return parsed.getAsJsonObject();
+            JsonObject object = parsed.getAsJsonObject();
+            if (!object.toString().equals(new String(bytes, StandardCharsets.UTF_8))) {
+                throw new IOException("Peer handshake JSON is not canonical");
+            }
+            return object;
         } catch (RuntimeException exception) {
             throw new IOException("Peer sent malformed handshake JSON", exception);
         }
