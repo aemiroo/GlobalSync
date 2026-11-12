@@ -20,11 +20,13 @@ A future implementation must define:
 6. Recovery from a known committed offset, with snapshot fallback.
 7. A clear policy for partitions: pause or reject writes that cannot be safely ordered instead of allowing split-brain state.
 
-A local atomic counter is not a global sequence. The SequenceClock in this milestone only orders events emitted inside one process.
+Each node now has a local SQLite journal with a monotonically increasing local offset. That offset is useful for replaying one node's journal, but it is not a global sequence and does not imply replication or commitment by another region. The per-node event sequence is restored from this journal after restart.
 
 ## Threading
 
 Bukkit/Paper world access must happen on the server's appropriate scheduler/thread. Network reads and writes must run off the main thread. Incoming messages should be validated off-thread, then marshalled onto the correct server thread before touching world state.
+
+Journal writes are submitted to a dedicated single-thread executor. Callers receive a CompletableFuture that completes after the SQLite append has committed. The executor preserves append order for submissions made through the plugin API.
 
 ## Replication layers
 
