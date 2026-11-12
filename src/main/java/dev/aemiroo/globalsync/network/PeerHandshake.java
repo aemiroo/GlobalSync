@@ -54,7 +54,9 @@ public final class PeerHandshake {
         String remoteServerId = string(remoteHello, "serverId");
         String remoteNonce = string(remoteHello, "nonce");
         try {
-            UUID.fromString(remoteNonce);
+            if (!UUID.fromString(remoteNonce).toString().equalsIgnoreCase(remoteNonce)) {
+                throw new IllegalArgumentException("Nonce is not in canonical UUID form");
+            }
         } catch (IllegalArgumentException exception) {
             throw new IOException("Peer supplied an invalid handshake nonce", exception);
         }
@@ -119,7 +121,8 @@ public final class PeerHandshake {
             throw new IOException("Peer handshake field has an invalid type: " + field);
         }
         try {
-            return value.getAsInt();
+            java.math.BigDecimal number = value.getAsBigDecimal();
+            return number.intValueExact();
         } catch (NumberFormatException exception) {
             throw new IOException("Peer handshake field is not an integer: " + field, exception);
         }
