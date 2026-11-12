@@ -94,13 +94,25 @@ public final class ReplicationMessageCodec {
         return ack.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    public static void validateAck(byte[] payload, UUID expectedEventId) throws IOException {
+    public static boolean isAcknowledgement(byte[] payload) throws IOException {
+        JsonObject json = parse(payload);
+        JsonElement type = json.get("type");
+        return type != null && type.isJsonPrimitive() && type.getAsJsonPrimitive().isString()
+                && "ACK".equals(type.getAsString());
+    }
+
+    public static ReplicationAcknowledgement decodeAck(byte[] payload, UUID expectedEventId) throws IOException {
         JsonObject json = parse(payload);
         requireFields(json, ACK_FIELDS);
         if (!"ACK".equals(string(json, "type")) || integer(json, "protocolVersion") != 1
                 || !expectedEventId.toString().equals(string(json, "eventId"))
                 || longInteger(json, "journalOffset") < 1)
             throw new IOException("Invalid replication acknowledgement");
+        return new ReplicationAcknowledgement(expectedEventId, longInteger(json, "journalOffset"));
+    }
+
+    public static void validateAck(byte[] payload, UUID expectedEventId) throws IOException {
+        decodeAck(payload, expectedEventId);
     }
 
     private static JsonObject parse(byte[] bytes) throws IOException {
