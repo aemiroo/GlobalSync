@@ -79,7 +79,10 @@ class PeerConnectionManagerIntegrationTest {
     @Test
     void establishesAuthenticatedMutualTlsPeerChannel() throws Exception {
         int portA = availablePort();
-        int portB = availablePort();
+        int portB;
+        do {
+            portB = availablePort();
+        } while (portA == portB);
         PeerConnectionManager managerA = manager(contextA, "a-region",
                 new PeerEndpoint("b-region", "127.0.0.1", portB, fingerprintB));
         PeerConnectionManager managerB = manager(contextB, "b-region",
@@ -108,9 +111,7 @@ class PeerConnectionManagerIntegrationTest {
             managerA.start(LOOPBACK, portA);
             managerA.connectConfiguredPeers();
 
-            assertTrue(await(() -> managerA.connectedPeerCount() == 0
-                    && managerB.connectedPeerCount() == 0, 2, TimeUnit.SECONDS));
-            Thread.sleep(150);
+            Thread.sleep(500);
             assertEquals(0, managerA.connectedPeerCount());
             assertEquals(0, managerB.connectedPeerCount());
         }
