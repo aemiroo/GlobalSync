@@ -4,6 +4,7 @@ import dev.aemiroo.globalsync.event.BlockChangeEventListener;
 import dev.aemiroo.globalsync.network.PeerAuthorizationRegistry;
 import dev.aemiroo.globalsync.network.PeerConnectionManager;
 import dev.aemiroo.globalsync.network.PeerEndpoint;
+import dev.aemiroo.globalsync.network.ReplicationMessageHandler;
 import dev.aemiroo.globalsync.network.TlsContextFactory;
 import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
@@ -26,6 +27,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -108,7 +110,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         if (peerConnectionManager == null) {
             getLogger().info("Peer networking is disabled.");
         } else {
-            getLogger().warning("Authenticated peer channels are enabled, but replication messages and world application are not implemented.");
+            getLogger().warning("Authenticated peers can submit allowlisted block events for durable receipt; outbound delivery and world application are not implemented.");
         }
     }
 
@@ -220,7 +222,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         sender.sendMessage("§7Peer transport: §f" + (peerConnectionManager == null
                 ? "disabled" : peerConnectionManager.connectedPeerCount() + " authenticated peer(s)"));
         sender.sendMessage("§7Replication: §e" + (peerConnectionManager == null
-                ? "journal capture only" : "authenticated channels only; event delivery unavailable"));
+                ? "journal capture only" : "durable inbound event receipt enabled; outbound delivery and world application unavailable"));
         return true;
     }
 
@@ -301,7 +303,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 maxFrameBytes,
                 maxConnections,
                 handshakeTimeoutMillis,
-                getLogger()
+                getLogger(),
+                new ReplicationMessageHandler(eventJournal, Set.copyOf(sharedWorlds))
         );
         InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
         int bindPort = network.getInt("bind-port", 28_120);
