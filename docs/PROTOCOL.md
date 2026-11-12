@@ -1,6 +1,6 @@
 # Replication protocol notes
 
-This document records the initial event contract and local journal behavior. It is not yet a network protocol implementation.
+This document records the event contract, local journal behavior, and transport foundations. It is not yet a live network protocol implementation.
 
 ## Envelope
 
@@ -43,18 +43,31 @@ Each node writes accepted outgoing events to its own SQLite journal before attem
 
 A journal offset belongs to one database. It is not comparable across regions and is not a global commit index. The current implementation does not yet prune acknowledged entries or coordinate retention across peers.
 
+## Transport foundation
+
+The current transport milestone adds reusable primitives only. It does not create a listener, dial peers, send journal entries, or acknowledge delivery.
+
+- TLS 1.3 contexts are loaded from operator-provisioned PKCS12 identity and trust stores.
+- The trust store performs normal certificate-chain validation. A separate SHA-256 leaf-certificate fingerprint check binds a connected TLS identity to an explicitly authorized peer.
+- Server sockets must require client certificates; the helper configures this with `needClientAuth`. Clients are restricted to TLS 1.3.
+- Peer messages use a four-byte big-endian length prefix. Empty frames and frames larger than the configured maximum are rejected before payload allocation.
+- The default maximum frame size is 1 MiB.
+- Store passwords are expected from environment variables, not committed to config files. Never log passwords or private-key material.
+
+The `network.enabled` setting remains false. The TLS paths, environment-variable names, and peer fingerprint map in config.yml are reserved for the next integration step and are not loaded by the plugin yet. Do not expose a port or treat a successful TLS handshake as authorization until the peer fingerprint has also been checked.
+
 ## Delivery requirements
 
-The transport must provide authenticated peer identity, integrity protection, bounded message sizes, reconnect behavior, acknowledgements, retry, and durable replay. It must not trust a peer merely because it can reach the TCP port.
+The eventual transport must provide authenticated peer identity, integrity protection, bounded message sizes, reconnect behavior, acknowledgements, retry, and durable replay. It must not trust a peer merely because it can reach the TCP port.
 
-Use TLS with mutual authentication or an equivalent authenticated encrypted channel. Do not send shared secrets in plaintext or log credentials. A shared HMAC secret alone would not provide confidentiality.
+Receivers acknowledge only after the event is durably accepted. Shared secrets must never be sent in plaintext. TLS with mutual authentication and explicit peer authorization is the selected baseline.
 
 ## Ordering and idempotency
 
 - Event IDs are used to recognize retries.
 - Per-origin sequence numbers detect gaps from one node.
 - A durable global commit offset (or a well-defined per-world partitioned log) establishes application order.
-- Receivers acknowledge only after the event is durably accepted.
 - Replaying an already committed event must not apply it twice.
+- Receiver-side deduplication must survive process restarts.
 
 The local SQLite journal is the durable outgoing history for this node. The in-memory EventDeduplicator remains only a bounded optimization and is not a substitute for durable receiver-side idempotency.
