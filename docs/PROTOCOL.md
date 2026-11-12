@@ -66,7 +66,7 @@ After the authenticated HELLO/READY handshake, the connection can receive versio
 
 Configure each remote peer under `network.peers.<server-id>` with `host`, `port`, and the SHA-256 fingerprint of its leaf certificate. The host must match a DNS name or IP address in the peer certificate's subject alternative name. Each node must also have its own PKCS12 identity store and a trust store containing the certificates or issuing CA certificates it is configured to trust.
 
-The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables inbound durable event receipt. It does not send local journal entries or apply received events to the Minecraft world. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
+The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables bidirectional durable event delivery. Received events are not applied to the Minecraft world. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
 
 ## Delivery requirements
 
