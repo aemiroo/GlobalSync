@@ -32,7 +32,7 @@ No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to ma
 
 ## Required controls before world application is enabled
 
-Do not implement or enable application-message exchange until all of these exist and are reviewed:
+Do not implement or enable remote world application until all of these exist and are reviewed:
 
 1. Per-peer rate limits and operational backpressure beyond the current one-event in-flight bound.
 2. Expanded fault-injection tests for lost ACKs, process crashes at each persistence boundary, prolonged partitions, and repeated reconnects.
