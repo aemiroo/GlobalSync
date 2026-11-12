@@ -30,8 +30,8 @@ public final class PeerHandshake {
             PeerAuthorizationRegistry authorization,
             int maxFrameBytes
     ) throws IOException {
-        if (socket == null || localServerId == null || localServerId.isBlank()
-                || localServerId.length() > 64 || authorization == null) {
+        if (socket == null || localServerId == null
+                || !localServerId.matches("[A-Za-z0-9._-]{1,64}") || authorization == null) {
             throw new IllegalArgumentException("Invalid peer handshake arguments");
         }
         if (maxFrameBytes < MAX_HANDSHAKE_BYTES) {
@@ -123,7 +123,7 @@ public final class PeerHandshake {
         canonical.addProperty("protocolVersion", integer(object, "protocolVersion"));
         canonical.addProperty("serverId", string(object, "serverId"));
         canonical.addProperty("nonce", string(object, "nonce"));
-        if (!canonical.equals(object)) {
+        if (!canonical.toString().equals(object.toString())) {
             throw new IOException("Peer HELLO message is not canonical");
         }
     }
@@ -132,7 +132,7 @@ public final class PeerHandshake {
         JsonObject canonical = new JsonObject();
         canonical.addProperty("type", string(object, "type"));
         canonical.addProperty("nonce", string(object, "nonce"));
-        if (!canonical.equals(object)) {
+        if (!canonical.toString().equals(object.toString())) {
             throw new IOException("Peer READY message is not canonical");
         }
     }
