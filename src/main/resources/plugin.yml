@@ -1,0 +1,15 @@
+name: GlobalSync
+version: 0.1.0-SNAPSHOT
+main: dev.aemiroo.globalsync.GlobalSyncPlugin
+api-version: '26.3'
+authors: [aemiroo]
+description: Multi-region replicated-world synchronization foundation.
+commands:
+  globalsync:
+    description: Shows GlobalSync node status.
+    usage: /globalsync status
+    permission: globalsync.admin
+permissions:
+  globalsync.admin:
+    description: Allows viewing GlobalSync status.
+    default: op
