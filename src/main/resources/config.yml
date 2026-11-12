@@ -3,25 +3,32 @@ server-id: "region-asia"
 shared-worlds:
   - "world"
 
-# Player block edits are written to the local journal. This does not send them
-# to other regions until peer delivery and remote application are implemented.
+# Player block edits are written to the local journal. They are not sent to
+# other regions until a versioned replication-message protocol is implemented.
 capture:
   player-block-changes: true
 
-# Peer networking remains disabled. TLS settings below document the intended
-# operator-provisioned PKCS12 layout; this milestone does not open a socket.
+# Peer networking is opt-in. Leave disabled until every node has operator-
+# provisioned TLS stores and matching peer identity configuration.
 network:
   enabled: false
   bind-address: "127.0.0.1"
   bind-port: 28120
   max-frame-bytes: 1048576
+  max-connections: 16
+  handshake-timeout-ms: 5000
   tls:
     identity-store: "tls/node.p12"
     identity-store-password-env: "GLOBALSYNC_KEYSTORE_PASSWORD"
     trust-store: "tls/truststore.p12"
     trust-store-password-env: "GLOBALSYNC_TRUSTSTORE_PASSWORD"
-  # Map each remote server-id to the SHA-256 fingerprint of its leaf certificate.
+  # Each peer ID must match the ID configured on the remote node.
+  # The certificate fingerprint is SHA-256 over the peer's leaf X.509 cert.
+  # The host must match a DNS name or IP address in the remote certificate SAN.
+  peers: {}
   # Example:
-  # authorized-peers:
-  #   region-europe: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  authorized-peers: {}
+  # peers:
+  #   region-europe:
+  #     host: "eu.example.net"
+  #     port: 28120
+  #     fingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
