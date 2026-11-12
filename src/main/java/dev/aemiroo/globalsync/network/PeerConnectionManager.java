@@ -219,7 +219,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         try {
             socket.setSoTimeout(handshakeTimeoutMillis);
             peerId = PeerHandshake.authenticate(socket, localServerId, authorization, maxFrameBytes);
-            session = new PeerSession(peerId, socket);
+            session = new PeerSession(peerId, socket, maxFrameBytes);
             PeerSession previous = connections.putIfAbsent(peerId, session);
             if (previous != null) throw new IOException("A connection for this peer is already active");
             socket.setSoTimeout(0);
@@ -342,17 +342,19 @@ public final class PeerConnectionManager implements AutoCloseable {
     private static final class PeerSession {
         private final String peerId;
         private final SSLSocket socket;
+        private final int maxFrameBytes;
         private final AtomicBoolean open = new AtomicBoolean(true);
         private final AtomicReference<PendingDelivery> pending = new AtomicReference<>();
-        private PeerSession(String peerId, SSLSocket socket) {
+        private PeerSession(String peerId, SSLSocket socket, int maxFrameBytes) {
             this.peerId = peerId;
             this.socket = socket;
+            this.maxFrameBytes = maxFrameBytes;
         }
         private boolean isOpen() { return open.get() && !socket.isClosed(); }
         private void write(byte[] frame) throws IOException {
             synchronized (socket) {
                 if (!isOpen()) throw new IOException("Peer session is closed");
-                FrameCodec.writeFrame(socket.getOutputStream(), frame);
+                FrameCodec.writeFrame(socket.getOutputStream(), frame, maxFrameBytes);
             }
         }
         private void close() {
