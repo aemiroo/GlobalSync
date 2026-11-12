@@ -196,6 +196,11 @@ public final class SqliteEventJournal implements AutoCloseable {
             }
         }
 
+        long previousRemoteReceipt = remoteReceiptOffset(peerServerId);
+        if (remoteReceiptOffset <= previousRemoteReceipt) {
+            throw new SQLException("Receiver receipt offset did not advance");
+        }
+
         try (PreparedStatement update = connection.prepareStatement("""
                 INSERT INTO peer_delivery
                     (peer_server_id, acknowledged_offset, last_event_id, remote_receipt_offset, updated_at)
