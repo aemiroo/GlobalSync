@@ -4,6 +4,9 @@ main: dev.aemiroo.globalsync.GlobalSyncPlugin
 api-version: '26.3'
 authors: [aemiroo]
 description: Multi-region replicated-world synchronization foundation.
+libraries:
+  - org.xerial:sqlite-jdbc:3.50.3.0
+  - com.google.code.gson:gson:2.13.1
 commands:
   globalsync:
     description: Shows GlobalSync node status.
