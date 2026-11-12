@@ -37,7 +37,7 @@ public final class ReplicationMessageCodec {
         json.addProperty("createdAt", event.createdAt().toString());
         json.addProperty("eventType", event.eventType());
         JsonObject attrs = new JsonObject();
-        new TreeMap<>(event.attributes()).forEach(attrs::addProperty);
+        new TreeMap<>(event.attributes()).forEach((key, value) -> attrs.addProperty(key, value));
         json.add("attributes", attrs);
         return json.toString().getBytes(StandardCharsets.UTF_8);
     }
