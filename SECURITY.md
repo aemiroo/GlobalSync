@@ -2,7 +2,7 @@
 
 ## Scope and security claims
 
-GlobalSync is experimental software. It is not currently safe to expose a peer port: this release does not open one, and `network.enabled` must remain `false`.
+GlobalSync is experimental software. Peer networking is disabled by default. When explicitly enabled, this version can establish authenticated, idle TLS peer channels only; it does not exchange replication events or apply remote world state.
 
 No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to make unauthorized behavior difficult to introduce, constrain the impact of a compromised node, and make releases auditable. A clean build or a passing test suite is not proof that source code is benign.
 
@@ -11,30 +11,33 @@ No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to ma
 - The Minecraft server process and its administrators are trusted. A server operator, host administrator, JVM agent, or another plugin with equivalent process access can alter GlobalSync behavior or read its secrets.
 - The local journal is trusted only to the extent that the server account and filesystem are protected. SQLite durability is not tamper-proof storage.
 - Peer certificates authenticate possession of a private key. The configured trust store and per-peer SHA-256 fingerprint allowlist must both authorize a peer.
-- A valid peer must not be treated as globally authoritative. Future protocol handlers must validate message type, schema, world allowlist, origin identity, sequence, size, and authorization independently.
+- A valid peer is not globally authoritative. Future protocol handlers must validate message type, schema, world allowlist, origin identity, sequence, size, and authorization independently.
 - A compromised regional node must not be allowed to execute commands, upload code, select arbitrary file paths, or change another node's configuration.
 
 ## Current safeguards
 
-- Peer networking is disabled by default and no listener is started in this milestone.
-- The transport foundation is TLS 1.3 only, supports mandatory client certificates, and provides explicit leaf-certificate fingerprint verification.
-- Frames are length-prefixed and bounded before payload allocation.
+- Peer networking is disabled by default.
+- TLS 1.3 only, mutual certificate authentication, certificate-chain validation, explicit leaf-certificate SHA-256 pinning, and client hostname verification are required for peer handshakes.
+- The HELLO/READY handshake has a strict field allowlist, protocol-version check, and fresh nonce confirmation.
+- Inbound/outbound connection workers are bounded; handshake reads have timeouts; pending and active sockets are closed during shutdown.
+- Length-prefixed frames are bounded before payload allocation.
+- Post-handshake application data is rejected. No replication message types or remote operations are implemented.
 - TLS private keys and store passwords must remain outside source control. Supply passwords through the configured environment variables.
 - The plugin has no supported remote command or arbitrary code execution feature.
 
-## Required controls before enabling networking
+## Required controls before replication messages are enabled
 
-Do not enable peer networking until all of these exist and are reviewed:
+Do not implement or enable application-message exchange until all of these exist and are reviewed:
 
-1. Mutual TLS with certificate-chain validation, hostname/identity checks where applicable, and an explicit peer ID-to-certificate fingerprint allowlist.
-2. No trust-all trust managers, disabled certificate checks, plaintext fallback, shared default passwords, or secret values in logs.
-3. A strict message allowlist and schema validation. Reject unknown message types, unsupported protocol versions, oversized fields, invalid IDs, invalid world names, and unauthorized origins.
-4. Per-peer rate limits, connection limits, read/write timeouts, bounded queues, and backpressure.
-5. Durable receiver-side deduplication and acknowledgements only after commit.
-6. No remote console, command dispatch, class loading, scripting, plugin installation, file access, or configuration mutation through the replication protocol.
-7. A safe failure mode: malformed or unauthorized messages are rejected; they never trigger world changes.
-8. Integration tests for invalid certificates, untrusted peers, wrong fingerprints, replay, malformed frames, oversized messages, and disconnects.
-9. A documented certificate rotation and revocation procedure.
+1. A strict message allowlist and schema validation. Reject unknown message types, unsupported protocol versions, oversized fields, invalid IDs, invalid world names, and unauthorized origins.
+2. Per-peer rate limits, connection limits, read/write timeouts, bounded queues, and backpressure.
+3. Durable receiver-side deduplication and acknowledgements only after commit.
+4. A safe failure mode: malformed or unauthorized messages are rejected; they never trigger world changes.
+5. Integration tests for invalid certificates, untrusted peers, wrong fingerprints, replay, malformed frames, oversized messages, and disconnects.
+6. A documented certificate rotation and revocation procedure.
+7. Explicit authorization for each shared world and each event type; a valid TLS peer must not gain unrestricted world-write authority.
+
+Never add remote console, command dispatch, class loading, scripting, plugin installation, arbitrary file access, or configuration mutation to the replication protocol.
 
 ## Release and repository hygiene
 
@@ -44,8 +47,8 @@ Do not enable peer networking until all of these exist and are reviewed:
 - Generate an SBOM and scan dependencies before publishing a release. Review transitive dependencies as well as direct dependencies.
 - Publish release artifacts from tagged commits and retain build provenance/attestations where available.
 - Verify release checksums and provenance before installing a jar. Never install a jar merely because it has the expected filename.
-- Keep private keys, trust-store passwords, tokens, and production configuration out of Git. Rotate any secret that was committed or exposed.
 - Build from a clean checkout with the documented Java and Maven versions. Compare the reviewed source commit with the release tag.
+- Keep private keys, trust-store passwords, tokens, and production configuration out of Git. Rotate any secret that was committed or exposed.
 
 ## Reporting a vulnerability
 
@@ -59,4 +62,4 @@ Do not publish exploit details or secrets in a public issue. Use GitHub's privat
 - Keep the Paper server, Java runtime, operating system, and other plugins patched.
 - Audit the full plugin set; another plugin running in the same JVM can potentially access GlobalSync data and memory.
 - Back up the journal and TLS material securely, and test restoration.
-- Leave peer networking disabled until the controls above have been implemented and tested.
+- Leave peer networking disabled unless you are deliberately testing the authenticated connection layer with operator-provisioned certificates and firewall restrictions.

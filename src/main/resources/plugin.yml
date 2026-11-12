@@ -5,8 +5,8 @@ api-version: '26.3'
 authors: [aemiroo]
 description: Multi-region replicated-world synchronization foundation.
 libraries:
-  - org.xerial:sqlite-jdbc:3.50.3.0
-  - com.google.code.gson:gson:2.13.1
+  - org.xerial:sqlite-jdbc:3.54.1.0
+  - com.google.code.gson:gson:2.15.0
 commands:
   globalsync:
     description: Shows GlobalSync node status.

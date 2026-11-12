@@ -1,6 +1,6 @@
 # Replication protocol notes
 
-This document records the event contract, local journal behavior, and transport foundations. It is not yet a live network protocol implementation.
+This document records the event contract, local journal behavior, and transport foundations. The authenticated connection handshake is implemented, but replication messages are not yet implemented.
 
 ## Envelope
 
@@ -43,18 +43,22 @@ Each node writes accepted outgoing events to its own SQLite journal before attem
 
 A journal offset belongs to one database. It is not comparable across regions and is not a global commit index. The current implementation does not yet prune acknowledged entries or coordinate retention across peers.
 
-## Transport foundation
+## Authenticated peer connection
 
-The current transport milestone adds reusable primitives only. It does not create a listener, dial peers, send journal entries, or acknowledge delivery.
+The current connection layer establishes an authenticated, idle TLS channel only. It does not send journal entries, receive replication events, acknowledge delivery, or apply remote world changes.
 
-- TLS 1.3 contexts are loaded from operator-provisioned PKCS12 identity and trust stores.
-- The trust store performs normal certificate-chain validation. A separate SHA-256 leaf-certificate fingerprint check binds a connected TLS identity to an explicitly authorized peer.
-- Server sockets must require client certificates; the helper configures this with `needClientAuth`. Clients are restricted to TLS 1.3.
-- Peer messages use a four-byte big-endian length prefix. Empty frames and frames larger than the configured maximum are rejected before payload allocation.
-- The default maximum frame size is 1 MiB.
-- Store passwords are expected from environment variables, not committed to config files. Never log passwords or private-key material.
+- TLS 1.3 is required; the server requires a client certificate.
+- The TLS trust store validates the certificate chain. After the TLS handshake, the remote node must also present a leaf certificate whose SHA-256 fingerprint matches the configured fingerprint for its claimed server ID.
+- The client verifies the server certificate hostname against the configured peer host.
+- Both sides exchange a strict protocol-version-1 HELLO containing a node ID and fresh UUID nonce. Each side validates the other node's configured certificate pin, then exchanges READY messages echoing the opposite nonce.
+- Unknown JSON fields, missing fields, incorrect types, invalid nonces, unsupported protocol versions, unconfigured peer IDs, and incorrect certificate pins are rejected.
+- Only one side dials each peer pair: the lexicographically lower server ID initiates the outbound connection. This avoids simultaneous duplicate connections when both nodes list one another.
+- Inbound and outbound connections share a bounded worker pool. Excess connections are rejected. TLS handshakes have a configured read timeout.
+- After authentication, the socket is held open so disconnects can be detected. Any post-handshake application data is currently rejected because no application-message allowlist exists yet.
 
-The `network.enabled` setting remains false. The TLS paths, environment-variable names, and peer fingerprint map in config.yml are reserved for the next integration step and are not loaded by the plugin yet. Do not expose a port or treat a successful TLS handshake as authorization until the peer fingerprint has also been checked.
+Configure each remote peer under `network.peers.<server-id>` with `host`, `port`, and the SHA-256 fingerprint of its leaf certificate. The host must match a DNS name or IP address in the peer certificate's subject alternative name. Each node must also have its own PKCS12 identity store and a trust store containing the certificates or issuing CA certificates it is configured to trust.
+
+The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener and initiates configured peer handshakes; it does not enable replication. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
 
 ## Delivery requirements
 

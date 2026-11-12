@@ -34,11 +34,13 @@ Bukkit/Paper world access must happen on the server's appropriate scheduler/thre
 
 Journal writes are submitted to a dedicated single-thread executor. Callers receive a CompletableFuture that completes after the SQLite append has committed. The executor preserves append order for submissions made through the plugin API.
 
-## Transport security and framing
+## Transport security and peer lifecycle
 
-The transport foundation provides TLS 1.3 context loading from PKCS12 stores, mandatory client-certificate configuration for future server sockets, explicit SHA-256 leaf-certificate pin verification, and bounded length-prefixed frames. Store passwords are supplied by environment variables. The plugin does not yet instantiate these helpers or open a socket; `network.enabled` remains false.
+The transport now has an opt-in TLS listener and outbound dialer. TLS 1.3 and mutual certificate authentication are mandatory. After the TLS handshake, each side must claim a configured node ID, prove possession of the matching pinned leaf certificate, and complete a nonce-based HELLO/READY exchange. The client also verifies the configured hostname against the certificate SAN.
 
-Peer authorization is two-stage: the certificate chain must validate against the configured trust store, then the leaf certificate fingerprint must match the configured peer identity. A trusted CA alone must not authorize arbitrary regional nodes.
+The listener and outbound connections use a bounded worker pool. Excess connections are rejected, handshakes have read timeouts, and shutdown closes active and pending sockets. A deterministic node-ID ordering chooses one dialer per peer pair to avoid simultaneous duplicate connections.
+
+This is an authenticated idle channel only. Application frames after the handshake are rejected. No event delivery, acknowledgements, remote world application, remote commands, file access, plugin loading, or configuration mutation are implemented. `network.enabled` remains false by default.
 
 ## Replication layers
 

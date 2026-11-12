@@ -6,7 +6,7 @@ The intended experience is that players connect to a nearby regional server whil
 
 ## Current status
 
-**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and reusable secure-transport primitives. It is not yet a working multi-region world.**
+**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and an opt-in authenticated peer connection layer. It is not yet a working multi-region world.**
 
 Implemented so far:
 
@@ -22,18 +22,22 @@ Implemented so far:
 - Multi-block player placements (such as beds) are recorded as individual block changes.
 - Before/after block data, world coordinates, player UUID, origin node, and sequence are stored in each event.
 - Capture can be disabled with `capture.player-block-changes`.
-- TLS 1.3 context loading from PKCS12 identity and trust stores.
-- Mutual-TLS server socket configuration and explicit SHA-256 peer certificate fingerprint verification helpers.
-- Bounded length-prefixed message framing (1 MiB default maximum).
+- TLS 1.3 mutual-authentication listener and outbound connection support, loaded from operator-provisioned PKCS12 stores.
+- Explicit peer ID-to-leaf-certificate SHA-256 pinning in addition to normal certificate-chain validation.
+- Client-side hostname verification and a strict HELLO/READY nonce handshake.
+- Bounded peer connection workers, handshake timeouts, and socket cleanup.
+- Bounded length-prefixed framing (1 MiB maximum).
 - A status command and Maven/GitHub Actions verification workflow.
+
+The peer connection layer is deliberately idle after authentication. Any application data sent after the handshake is rejected.
 
 Not implemented yet:
 
-- A live peer listener, outbound peer connections, or peer discovery.
-- Loading transport settings or TLS credentials from plugin configuration.
+- Replication message schemas or application-message exchange.
 - Remote event delivery, acknowledgements, retries, or durable receiver-side deduplication.
 - Applying incoming block changes on another server.
 - Rollback or compensation if a remote region disagrees with a local edit.
+- Automatic peer reconnection and heartbeat/liveness messages.
 - Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
 - Chunk snapshots, entity simulation, and remote player rendering.
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
@@ -48,7 +52,7 @@ Player block edits are currently journaled locally only. They are not transmitte
 - Java **25**
 - Maven 3.9+
 
-Paper API is compiled as a provided dependency. Paper's plugin library loader downloads SQLite JDBC and Gson at runtime.
+Paper API is compiled as a provided dependency. Paper's plugin library loader downloads the pinned SQLite JDBC and Gson versions at runtime.
 
 ## Build
 
@@ -66,11 +70,28 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 4. Set a unique `server-id` for each region.
 5. Ensure the intended world names appear under `shared-worlds`.
 6. Leave `capture.player-block-changes: true` to journal player block edits, or set it to `false` to disable capture.
-7. Keep `network.enabled: false`; this build does not open peer sockets.
-8. Restart the server.
+7. Keep `network.enabled: false` unless you are deliberately testing the authenticated connection layer.
+
+### Controlled peer-connection testing
+
+The network layer is opt-in and currently establishes authenticated idle channels only; it does not replicate world state.
+
+Before enabling it:
+
+1. Provision a unique PKCS12 identity store for each node and a trust store containing the peer certificate chains that node should trust.
+2. Place both stores under that node's `plugins/GlobalSync/` data directory. The default paths are `tls/node.p12` and `tls/truststore.p12`.
+3. Set the environment variables named by `identity-store-password-env` and `trust-store-password-env` in the server process environment. Do not put passwords in YAML or source control.
+4. Configure the peer under `network.peers.<remote-server-id>` with its DNS name or IP, listening port, and SHA-256 fingerprint of its leaf certificate.
+5. Configure the reciprocal peer entry on the other node. The configured host must match a DNS name or IP SAN in the remote certificate.
+6. Set `network.bind-address` to the intended local interface, configure the same listening port on both nodes as appropriate, and restrict firewall access to known regional nodes.
+7. Only then set `network.enabled: true` on both nodes and restart.
+
+Each pair uses the lexicographically lower server ID as the outbound dialer. Both nodes must authorize one another by ID and certificate fingerprint. Invalid certificates, unknown IDs, handshake failures, and excess connections are rejected. If the configuration or TLS stores are invalid, GlobalSync disables itself rather than starting with weaker security.
+
+**Do not expose this as a production replication network.** No replication messages, remote world changes, remote commands, file access, plugin loading, or remote configuration changes are implemented. Keep networking disabled outside controlled connection tests.
 
 The local event database is stored at `plugins/GlobalSync/journal/events.db`. Back it up with the server stopped or by using a SQLite-aware backup method.
 
-Use `/globalsync status` to inspect the current node, capture state, and journal offset.
+Use `/globalsync status` to inspect the current node, capture state, journal offset, and authenticated peer count.
 
-See [the architecture notes](docs/ARCHITECTURE.md) for consistency goals and [the protocol notes](docs/PROTOCOL.md) for the event and transport contract.
+See [the architecture notes](docs/ARCHITECTURE.md), [the protocol notes](docs/PROTOCOL.md), and [the security policy](SECURITY.md) for implementation boundaries and operational requirements.
