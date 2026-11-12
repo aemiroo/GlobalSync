@@ -84,6 +84,8 @@ public final class PeerConnectionManager implements AutoCloseable {
             throw new IllegalArgumentException("maxFrameBytes must be between 4096 and 1048576");
         if (maxConnections < 1 || maxConnections > 64)
             throw new IllegalArgumentException("maxConnections must be between 1 and 64");
+        if (authorization.peers().size() > maxConnections)
+            throw new IllegalArgumentException("Configured peer count cannot exceed maxConnections");
         if (handshakeTimeoutMillis < 1_000 || handshakeTimeoutMillis > 30_000)
             throw new IllegalArgumentException("handshakeTimeoutMillis must be between 1000 and 30000");
         if (acknowledgementTimeoutMillis < 1_000 || acknowledgementTimeoutMillis > 120_000)
