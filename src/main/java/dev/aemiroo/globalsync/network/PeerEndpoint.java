@@ -6,7 +6,13 @@ import java.util.Objects;
 public record PeerEndpoint(String serverId, String host, int port, String sha256Fingerprint) {
     public PeerEndpoint {
         requireText(serverId, "serverId");
+        if (!serverId.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IllegalArgumentException("serverId must contain only letters, digits, dot, underscore or hyphen");
+        }
         requireText(host, "host");
+        if (!host.matches("[A-Za-z0-9.:%_-]+")) {
+            throw new IllegalArgumentException("host contains unsupported characters");
+        }
         Objects.requireNonNull(sha256Fingerprint, "sha256Fingerprint");
         if (port < 1 || port > 65_535) {
             throw new IllegalArgumentException("port must be between 1 and 65535");
