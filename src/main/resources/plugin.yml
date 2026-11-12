@@ -1,5 +1,5 @@
 name: GlobalSync
-version: ${project.version}
+version: 0.1.0-SNAPSHOT
 main: dev.aemiroo.globalsync.GlobalSyncPlugin
 api-version: '26.3'
 authors: [aemiroo]
