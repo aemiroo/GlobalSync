@@ -188,6 +188,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             Socket plainSocket = new Socket();
             pendingSockets.add(plainSocket);
             SSLSocket tlsSocket = null;
+            long connectionStarted = System.nanoTime();
             try {
                 plainSocket.connect(new InetSocketAddress(endpoint.host(), endpoint.port()), handshakeTimeoutMillis);
                 tlsSocket = (SSLSocket) tlsContext.getSocketFactory()
@@ -197,7 +198,9 @@ public final class PeerConnectionManager implements AutoCloseable {
                 TlsContextFactory.configureClientSocket(tlsSocket);
                 tlsSocket.setSoTimeout(handshakeTimeoutMillis);
                 authenticateAndHold(tlsSocket);
-                backoff = reconnectMinMillis;
+                if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - connectionStarted) >= 30_000) {
+                    backoff = reconnectMinMillis;
+                }
             } catch (IOException | RuntimeException exception) {
                 closeQuietly(tlsSocket);
                 if (running.get()) logger.warning("Peer " + endpoint.serverId() + " unavailable: "
