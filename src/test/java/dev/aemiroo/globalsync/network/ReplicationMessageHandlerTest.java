@@ -1,7 +1,7 @@
 package dev.aemiroo.globalsync.network;
 
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
-import dev.aemiroo.globalsync.replication.SqliteEventJournal;
+import dev.aemiroo.globalsync.replication.SqliteReceivedEventStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -21,7 +21,7 @@ class ReplicationMessageHandlerTest {
     void acknowledgesOnlyAfterDurableAppendAndTreatsRetriesIdempotently() throws Exception {
         Path database = directory.resolve("events.db");
         ReplicationEnvelope event = event();
-        try (SqliteEventJournal journal = new SqliteEventJournal(database)) {
+        try (SqliteReceivedEventStore journal = new SqliteReceivedEventStore(database)) {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
             byte[] payload = ReplicationMessageCodec.encodeEvent(event);
 
@@ -35,7 +35,7 @@ class ReplicationMessageHandlerTest {
         }
 
         // The event remains deduplicated after the receiver process/database is reopened.
-        try (SqliteEventJournal recovered = new SqliteEventJournal(database)) {
+        try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(recovered, Set.of("world"));
             ReplicationMessageCodec.validateAck(handler.handle(
                     ReplicationMessageCodec.encodeEvent(event), "region-eu"), event.eventId());
@@ -45,7 +45,7 @@ class ReplicationMessageHandlerTest {
 
     @Test
     void rejectsOriginSpoofingAndUnsharedWorlds() throws Exception {
-        try (SqliteEventJournal journal = new SqliteEventJournal(directory.resolve("events.db"))) {
+        try (SqliteReceivedEventStore journal = new SqliteReceivedEventStore(directory.resolve("received.db"))) {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
             assertThrows(java.io.IOException.class, () -> handler.handle(
                     ReplicationMessageCodec.encodeEvent(event()), "different-peer"));
