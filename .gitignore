@@ -4,3 +4,14 @@ target/
 .vscode/
 .DS_Store
 *.log
+
+# Local secrets and peer TLS material
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.jks
+*.keystore
+/tls/
+/secrets/
