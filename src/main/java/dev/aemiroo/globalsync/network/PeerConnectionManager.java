@@ -114,6 +114,10 @@ public final class PeerConnectionManager implements AutoCloseable {
             throw new IllegalStateException("Peer listener must be started before dialing peers");
         }
         for (PeerEndpoint endpoint : authorization.peers()) {
+            // Use one deterministic dialer per pair to avoid duplicate simultaneous links.
+            if (localServerId.compareTo(endpoint.serverId()) > 0) {
+                continue;
+            }
             try {
                 connectionWorkers.execute(() -> connectAndHold(endpoint));
             } catch (java.util.concurrent.RejectedExecutionException exception) {
