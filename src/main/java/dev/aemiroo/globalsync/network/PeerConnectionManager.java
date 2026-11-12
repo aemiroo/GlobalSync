@@ -3,6 +3,7 @@ package dev.aemiroo.globalsync.network;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
+import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -249,12 +250,12 @@ public final class PeerConnectionManager implements AutoCloseable {
         }
     }
 
-    private static void closeQuietly(Socket socket) {
-        if (socket == null) {
+    private static void closeQuietly(Closeable closeable) {
+        if (closeable == null) {
             return;
         }
         try {
-            socket.close();
+            closeable.close();
         } catch (IOException ignored) {
             // Closing during shutdown is best-effort.
         }
