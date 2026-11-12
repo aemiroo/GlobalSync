@@ -14,10 +14,14 @@ public final class PeerAuthorizationRegistry {
     public PeerAuthorizationRegistry(Collection<PeerEndpoint> endpoints) {
         Objects.requireNonNull(endpoints, "endpoints");
         Map<String, PeerEndpoint> copy = new LinkedHashMap<>();
+        java.util.Set<String> fingerprints = new java.util.HashSet<>();
         for (PeerEndpoint endpoint : endpoints) {
             Objects.requireNonNull(endpoint, "endpoint");
             if (copy.putIfAbsent(endpoint.serverId(), endpoint) != null) {
                 throw new IllegalArgumentException("Duplicate peer server ID: " + endpoint.serverId());
+            }
+            if (!fingerprints.add(endpoint.sha256Fingerprint())) {
+                throw new IllegalArgumentException("A certificate fingerprint cannot authorize multiple peer IDs");
             }
         }
         this.peers = Map.copyOf(copy);
