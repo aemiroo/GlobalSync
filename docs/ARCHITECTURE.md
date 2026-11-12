@@ -20,7 +20,7 @@ A future implementation must define:
 6. Recovery from a known committed offset, with snapshot fallback.
 7. A clear policy for partitions: pause or reject writes that cannot be safely ordered instead of allowing split-brain state.
 
-Each node now has a local SQLite journal with a monotonically increasing local offset. That offset is useful for replaying one node's journal, but it is not a global sequence and does not imply replication or commitment by another region. The per-node event sequence is restored from this journal after restart.
+Each node has a local SQLite journal with a monotonically increasing local offset. That offset is useful for replaying one node's journal, but it is not a global sequence and does not imply replication or commitment by another region. The per-node event sequence is restored from this journal after restart.
 
 ## Capture boundary
 
@@ -33,6 +33,12 @@ This does not yet cover environmental simulation, block entities, inventories, r
 Bukkit/Paper world access must happen on the server's appropriate scheduler/thread. Network reads and writes must run off the main thread. Incoming messages should be validated off-thread, then marshalled onto the correct server thread before touching world state.
 
 Journal writes are submitted to a dedicated single-thread executor. Callers receive a CompletableFuture that completes after the SQLite append has committed. The executor preserves append order for submissions made through the plugin API.
+
+## Transport security and framing
+
+The transport foundation provides TLS 1.3 context loading from PKCS12 stores, mandatory client-certificate configuration for future server sockets, explicit SHA-256 leaf-certificate pin verification, and bounded length-prefixed frames. Store passwords are supplied by environment variables. The plugin does not yet instantiate these helpers or open a socket; `network.enabled` remains false.
+
+Peer authorization is two-stage: the certificate chain must validate against the configured trust store, then the leaf certificate fingerprint must match the configured peer identity. A trusted CA alone must not authorize arbitrary regional nodes.
 
 ## Replication layers
 

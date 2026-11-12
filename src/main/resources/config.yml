@@ -4,14 +4,24 @@ shared-worlds:
   - "world"
 
 # Player block edits are written to the local journal. This does not send them
-# to other regions until authenticated peer transport is implemented.
+# to other regions until peer delivery and remote application are implemented.
 capture:
   player-block-changes: true
 
-# Networking is intentionally not enabled in this milestone.
-# Do not expose a future peer transport directly to the public internet.
+# Peer networking remains disabled. TLS settings below document the intended
+# operator-provisioned PKCS12 layout; this milestone does not open a socket.
 network:
   enabled: false
   bind-address: "127.0.0.1"
   bind-port: 28120
-  shared-secret: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
+  max-frame-bytes: 1048576
+  tls:
+    identity-store: "tls/node.p12"
+    identity-store-password-env: "GLOBALSYNC_KEYSTORE_PASSWORD"
+    trust-store: "tls/truststore.p12"
+    trust-store-password-env: "GLOBALSYNC_TRUSTSTORE_PASSWORD"
+  # Map each remote server-id to the SHA-256 fingerprint of its leaf certificate.
+  # Example:
+  # authorized-peers:
+  #   region-europe: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  authorized-peers: {}
