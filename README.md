@@ -39,7 +39,6 @@ Not implemented yet:
 
 - Outbound event delivery from the local journal, per-peer ACK cursors, retries, and reconnect replay.
 - Applying durably received block changes on another server.
-- Applying incoming block changes on another server.
 - Rollback or compensation if a remote region disagrees with a local edit.
 - Automatic peer reconnection and heartbeat/liveness messages.
 - Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
