@@ -7,6 +7,9 @@ import com.google.gson.JsonParser;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.UUID;
@@ -89,16 +92,21 @@ public final class PeerHandshake {
     private static JsonObject read(SSLSocket socket, int maxFrameBytes) throws IOException {
         byte[] bytes = FrameCodec.readFrame(socket.getInputStream(), Math.min(maxFrameBytes, MAX_HANDSHAKE_BYTES));
         try {
-            JsonElement parsed = JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8));
+            String json = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            JsonElement parsed = JsonParser.parseString(json);
             if (!parsed.isJsonObject()) {
                 throw new IOException("Peer handshake message must be a JSON object");
             }
             JsonObject object = parsed.getAsJsonObject();
-            if (!object.toString().equals(new String(bytes, StandardCharsets.UTF_8))) {
+            if (!object.toString().equals(json)) {
                 throw new IOException("Peer handshake JSON is not canonical");
             }
             return object;
-        } catch (RuntimeException exception) {
+        } catch (CharacterCodingException | RuntimeException exception) {
             throw new IOException("Peer sent malformed handshake JSON", exception);
         }
     }
@@ -149,7 +157,7 @@ public final class PeerHandshake {
         try {
             java.math.BigDecimal number = value.getAsBigDecimal();
             return number.intValueExact();
-        } catch (NumberFormatException exception) {
+        } catch (NumberFormatException | ArithmeticException exception) {
             throw new IOException("Peer handshake field is not an integer: " + field, exception);
         }
     }
