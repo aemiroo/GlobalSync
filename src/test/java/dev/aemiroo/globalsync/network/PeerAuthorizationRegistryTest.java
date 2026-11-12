@@ -40,6 +40,15 @@ class PeerAuthorizationRegistryTest {
     }
 
     @Test
+    void rejectsOneCertificatePinnedToMultiplePeerIds() {
+        PeerEndpoint first = new PeerEndpoint("region-europe", "eu.example.net", 28120, FINGERPRINT);
+        PeerEndpoint second = new PeerEndpoint("region-us", "us.example.net", 28120, FINGERPRINT);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new PeerAuthorizationRegistry(List.of(first, second)));
+    }
+
+    @Test
     void exposesOnlyConfiguredPeers() {
         PeerEndpoint endpoint = new PeerEndpoint("region-europe", "eu.example.net", 28120, FINGERPRINT);
         PeerAuthorizationRegistry registry = new PeerAuthorizationRegistry(List.of(endpoint));
