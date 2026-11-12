@@ -116,7 +116,11 @@ public final class ReplicationMessageCodec {
         try {
             JsonElement parsed = JsonParser.parseString(text);
             if (!parsed.isJsonObject()) throw new IOException("Replication message must be a JSON object");
-            return parsed.getAsJsonObject();
+            JsonObject object = parsed.getAsJsonObject();
+            // Re-serialization equality also rejects duplicate keys, whitespace variants,
+            // and alternate encodings that Gson would otherwise normalize silently.
+            if (!object.toString().equals(text)) throw new IOException("Replication message is not canonical JSON");
+            return object;
         } catch (RuntimeException exception) {
             throw new IOException("Malformed replication JSON", exception);
         }
