@@ -160,6 +160,52 @@ class PeerConnectionManagerIntegrationTest {
         }
     }
 
+    @Test
+    void reconnectsAndReplaysEntriesAfterTheLastDurableAcknowledgement() throws Exception {
+        int portA = availablePort();
+        int portB = availablePort();
+        Path nodeA = testDirectory.resolve("reconnect-a");
+        Path nodeB = testDirectory.resolve("reconnect-b");
+        try (SqliteEventJournal journalA = new SqliteEventJournal(nodeA.resolve("events.db"));
+             SqliteEventJournal journalB = new SqliteEventJournal(nodeB.resolve("events.db"));
+             SqliteReceivedEventStore inboxA = new SqliteReceivedEventStore(nodeA.resolve("received.db"));
+             SqliteReceivedEventStore inboxB = new SqliteReceivedEventStore(nodeB.resolve("received.db"))) {
+            journalA.append(blockEvent("a-region", 1));
+            PeerConnectionManager managerA = managerWithDelivery(contextA, "a-region",
+                    new PeerEndpoint("b-region", "127.0.0.1", portB, fingerprintB), journalA, inboxA);
+            PeerConnectionManager managerB = managerWithDelivery(contextB, "b-region",
+                    new PeerEndpoint("a-region", "127.0.0.1", portA, fingerprintA), journalB, inboxB);
+            try (managerA) {
+                managerB.start(LOOPBACK, portB);
+                managerA.start(LOOPBACK, portA);
+                managerA.connectConfiguredPeers();
+                assertTrue(await(() -> {
+                    try { return inboxB.size() == 1 && journalA.acknowledgedOffset("b-region") == 1; }
+                    catch (SQLException exception) { return false; }
+                }, 10, TimeUnit.SECONDS), "first event should be acknowledged before disconnect");
+
+                managerB.close();
+                assertTrue(await(() -> managerA.connectedPeerCount() == 0, 5, TimeUnit.SECONDS),
+                        "dialer should observe the peer disconnect");
+                journalA.append(blockEvent("a-region", 2));
+
+                PeerConnectionManager restartedB = managerWithDelivery(contextB, "b-region",
+                        new PeerEndpoint("a-region", "127.0.0.1", portA, fingerprintA), journalB, inboxB);
+                try (restartedB) {
+                    restartedB.start(LOOPBACK, portB);
+                    assertTrue(await(() -> {
+                        try {
+                            return inboxB.size() == 2 && journalA.acknowledgedOffset("b-region") == 2;
+                        } catch (SQLException exception) { return false; }
+                    }, 15, TimeUnit.SECONDS),
+                            "reconnected peer should receive the journal entry after its persisted cursor");
+                }
+            } finally {
+                managerB.close();
+            }
+        }
+    }
+
     private static PeerConnectionManager managerWithDelivery(SSLContext context, String localId,
             PeerEndpoint remote, SqliteEventJournal journal, SqliteReceivedEventStore inbox) {
         return new PeerConnectionManager(context, localId, new PeerAuthorizationRegistry(List.of(remote)),
