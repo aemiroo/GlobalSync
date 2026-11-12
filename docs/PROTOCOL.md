@@ -1,6 +1,6 @@
 # Replication protocol notes
 
-This document records the event contract, local journal behavior, and transport foundations. The authenticated connection handshake is implemented, but replication messages are not yet implemented.
+This document records the event contract, local journal behavior, authenticated transport, and the first inbound replication-message implementation.
 
 ## Envelope
 
@@ -28,7 +28,7 @@ The current Bukkit integration captures successful player block placements and b
 - Handlers run at MONITOR priority and ignore cancelled events. They do not change the world or cancel gameplay.
 - Block data is serialized using Bukkit's block-data string representation.
 
-This first capture pass intentionally does not include explosions, piston movement, fluids, redstone, growth, containers, block entities, or other environmental changes. It also does not yet transmit or apply captured events on another server.
+This first capture pass intentionally does not include explosions, piston movement, fluids, redstone, growth, containers, block entities, or other environmental changes. Captured events are journaled locally; outbound sending and remote world application are not implemented.
 
 ## Local journal
 
@@ -45,7 +45,7 @@ A journal offset belongs to one database. It is not comparable across regions an
 
 ## Authenticated peer connection
 
-The current connection layer establishes an authenticated, idle TLS channel only. It does not send journal entries, receive replication events, acknowledge delivery, or apply remote world changes.
+After the authenticated HELLO/READY handshake, the connection can receive version-1 EVENT frames. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the SQLite transaction commits. The sender/replay path is not implemented yet.
 
 - TLS 1.3 is required; the server requires a client certificate.
 - The TLS trust store validates the certificate chain. After the TLS handshake, the remote node must also present a leaf certificate whose SHA-256 fingerprint matches the configured fingerprint for its claimed server ID.
@@ -54,15 +54,19 @@ The current connection layer establishes an authenticated, idle TLS channel only
 - Unknown JSON fields, missing fields, incorrect types, invalid nonces, unsupported protocol versions, unconfigured peer IDs, and incorrect certificate pins are rejected.
 - Only one side dials each peer pair: the lexicographically lower server ID initiates the outbound connection. This avoids simultaneous duplicate connections when both nodes list one another.
 - Inbound and outbound connections share a bounded worker pool. Excess connections are rejected. TLS handshakes have a configured read timeout.
-- After authentication, the socket is held open so disconnects can be detected. Any post-handshake application data is currently rejected because no application-message allowlist exists yet.
+- EVENT messages are currently limited to `BLOCK_PLACE` and `BLOCK_BREAK`; their payload must contain exactly the player UUID, integer coordinates, previous block data, and resulting block data.
+- The receiver binds `originServerId` to the authenticated TLS peer ID and checks the world against `shared-worlds`.
+- The receiver inbox is stored separately at `journal/received.db` with WAL mode and FULL synchronous commits. Event ID and `(origin node, origin sequence)` are unique keys. Exact retries return the original inbox offset; conflicting reuse is rejected.
+- ACK messages contain only the protocol version, event ID, and receiver-local durable inbox offset. They are not global offsets and do not imply that the event was applied to the Minecraft world.
+- Other application message types, unknown fields, malformed values, unsupported versions, and unsupported event types are rejected.
 
 Configure each remote peer under `network.peers.<server-id>` with `host`, `port`, and the SHA-256 fingerprint of its leaf certificate. The host must match a DNS name or IP address in the peer certificate's subject alternative name. Each node must also have its own PKCS12 identity store and a trust store containing the certificates or issuing CA certificates it is configured to trust.
 
-The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener and initiates configured peer handshakes; it does not enable replication. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
+The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables inbound durable event receipt. It does not send local journal entries or apply received events to the Minecraft world. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
 
 ## Delivery requirements
 
-The eventual transport must provide authenticated peer identity, integrity protection, bounded message sizes, reconnect behavior, acknowledgements, retry, and durable replay. It must not trust a peer merely because it can reach the TCP port.
+The complete transport still needs outbound journal delivery, per-peer acknowledgement tracking, retry/reconnect, durable replay, rate limits, and backpressure. The current inbound path provides authenticated peer identity, bounded frames, schema allowlisting, durable deduplication, and commit-before-ACK. It must not trust a peer merely because it can reach the TCP port.
 
 Receivers acknowledge only after the event is durably accepted. Shared secrets must never be sent in plaintext. TLS with mutual authentication and explicit peer authorization is the selected baseline.
 
@@ -72,6 +76,6 @@ Receivers acknowledge only after the event is durably accepted. Shared secrets m
 - Per-origin sequence numbers detect gaps from one node.
 - A durable global commit offset (or a well-defined per-world partitioned log) establishes application order.
 - Replaying an already committed event must not apply it twice.
-- Receiver-side deduplication must survive process restarts.
+- Receiver-side deduplication must survive process restarts. The inbound SQLite inbox currently enforces this for received block-edit events.
 
 The local SQLite journal is the durable outgoing history for this node. The in-memory EventDeduplicator remains only a bounded optimization and is not a substitute for durable receiver-side idempotency.
