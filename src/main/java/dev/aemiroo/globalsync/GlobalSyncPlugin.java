@@ -11,6 +11,7 @@ import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
 import dev.aemiroo.globalsync.replication.SqliteEventJournal;
+import dev.aemiroo.globalsync.replication.SqliteReceivedEventStore;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -40,6 +41,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     private SequenceClock sequenceClock;
     private EventDeduplicator eventDeduplicator;
     private SqliteEventJournal eventJournal;
+    private SqliteReceivedEventStore receivedEventStore;
     private ExecutorService journalExecutor;
     private AtomicLong journalOffset;
     private PeerConnectionManager peerConnectionManager;
@@ -72,6 +74,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             Path journalPath = getDataFolder().toPath().resolve("journal").resolve("events.db");
             Files.createDirectories(journalPath.getParent());
             eventJournal = new SqliteEventJournal(journalPath);
+            Path receivedPath = journalPath.getParent().resolve("received.db");
+            receivedEventStore = new SqliteReceivedEventStore(receivedPath);
             sequenceClock = new SequenceClock(eventJournal.lastSequence(serverId));
             journalOffset = new AtomicLong(eventJournal.lastOffset());
             journalExecutor = Executors.newSingleThreadExecutor(task -> {
@@ -304,7 +308,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 maxConnections,
                 handshakeTimeoutMillis,
                 getLogger(),
-                new ReplicationMessageHandler(eventJournal, Set.copyOf(sharedWorlds))
+                new ReplicationMessageHandler(receivedEventStore, Set.copyOf(sharedWorlds))
         );
         InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
         int bindPort = network.getInt("bind-port", 28_120);
@@ -354,15 +358,23 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     }
 
     private void closeJournal() {
-        if (eventJournal == null) {
-            return;
+        if (receivedEventStore != null) {
+            try {
+                receivedEventStore.close();
+            } catch (SQLException exception) {
+                getLogger().log(Level.SEVERE, "Could not close the received-event store cleanly.", exception);
+            } finally {
+                receivedEventStore = null;
+            }
         }
-        try {
-            eventJournal.close();
-        } catch (SQLException exception) {
-            getLogger().log(Level.SEVERE, "Could not close the local event journal cleanly.", exception);
-        } finally {
-            eventJournal = null;
+        if (eventJournal != null) {
+            try {
+                eventJournal.close();
+            } catch (SQLException exception) {
+                getLogger().log(Level.SEVERE, "Could not close the local event journal cleanly.", exception);
+            } finally {
+                eventJournal = null;
+            }
         }
     }
 }
