@@ -272,16 +272,22 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         }
         String identityPasswordEnv = tls.getString("identity-store-password-env", "");
         String trustPasswordEnv = tls.getString("trust-store-password-env", "");
-        char[] identityPassword = requireEnvironmentSecret(identityPasswordEnv);
-        char[] trustPassword = requireEnvironmentSecret(trustPasswordEnv);
+        char[] identityPassword = null;
+        char[] trustPassword = null;
         SSLContext tlsContext;
         try {
+            identityPassword = requireEnvironmentSecret(identityPasswordEnv);
+            trustPassword = requireEnvironmentSecret(trustPasswordEnv);
             Path identityStore = resolveTlsStore(tls.getString("identity-store", ""));
             Path trustStore = resolveTlsStore(tls.getString("trust-store", ""));
             tlsContext = TlsContextFactory.create(identityStore, identityPassword, trustStore, trustPassword);
         } finally {
-            Arrays.fill(identityPassword, '\0');
-            Arrays.fill(trustPassword, '\0');
+            if (identityPassword != null) {
+                Arrays.fill(identityPassword, '\0');
+            }
+            if (trustPassword != null) {
+                Arrays.fill(trustPassword, '\0');
+            }
         }
 
         int maxFrameBytes = network.getInt("max-frame-bytes", 1_048_576);
