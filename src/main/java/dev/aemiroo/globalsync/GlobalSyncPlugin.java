@@ -57,8 +57,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         }
 
         serverId = getConfig().getString("server-id", "").trim();
-        if (serverId.isBlank() || serverId.equalsIgnoreCase("change-me") || serverId.length() > 64) {
-            getLogger().severe("Set a unique server-id (1-64 characters) in config.yml before enabling GlobalSync.");
+        if (!serverId.matches("[A-Za-z0-9._-]{1,64}") || serverId.equalsIgnoreCase("change-me")) {
+            getLogger().severe("Set a unique server-id using letters, digits, dot, underscore or hyphen (1-64 characters).");
             Bukkit.getPluginManager().disablePlugin(this);
             return;
         }
@@ -119,14 +119,15 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             journalExecutor.shutdown();
             try {
                 if (!journalExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    getLogger().warning("Journal worker did not stop in time; requesting shutdown.");
+                    getLogger().warning("Journal worker did not stop in time; leaving the journal connection for process shutdown.");
                     journalExecutor.shutdownNow();
-                    journalExecutor.awaitTermination(1, TimeUnit.SECONDS);
+                    return;
                 }
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 journalExecutor.shutdownNow();
-                getLogger().warning("Interrupted while waiting for the journal worker to stop.");
+                getLogger().warning("Interrupted while waiting for the journal worker to stop; leaving the journal connection for process shutdown.");
+                return;
             }
         }
         closeJournal();
