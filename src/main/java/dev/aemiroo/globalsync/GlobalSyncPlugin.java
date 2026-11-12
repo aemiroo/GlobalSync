@@ -4,12 +4,14 @@ import dev.aemiroo.globalsync.event.BlockChangeEventListener;
 import dev.aemiroo.globalsync.network.PeerAuthorizationRegistry;
 import dev.aemiroo.globalsync.network.PeerConnectionManager;
 import dev.aemiroo.globalsync.network.PeerEndpoint;
+import dev.aemiroo.globalsync.network.ReplicationMessageHandler;
 import dev.aemiroo.globalsync.network.TlsContextFactory;
 import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
 import dev.aemiroo.globalsync.replication.SqliteEventJournal;
+import dev.aemiroo.globalsync.replication.SqliteReceivedEventStore;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -26,6 +28,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -38,6 +41,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     private SequenceClock sequenceClock;
     private EventDeduplicator eventDeduplicator;
     private SqliteEventJournal eventJournal;
+    private SqliteReceivedEventStore receivedEventStore;
     private ExecutorService journalExecutor;
     private AtomicLong journalOffset;
     private PeerConnectionManager peerConnectionManager;
@@ -70,6 +74,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             Path journalPath = getDataFolder().toPath().resolve("journal").resolve("events.db");
             Files.createDirectories(journalPath.getParent());
             eventJournal = new SqliteEventJournal(journalPath);
+            Path receivedPath = journalPath.getParent().resolve("received.db");
+            receivedEventStore = new SqliteReceivedEventStore(receivedPath);
             sequenceClock = new SequenceClock(eventJournal.lastSequence(serverId));
             journalOffset = new AtomicLong(eventJournal.lastOffset());
             journalExecutor = Executors.newSingleThreadExecutor(task -> {
@@ -108,7 +114,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         if (peerConnectionManager == null) {
             getLogger().info("Peer networking is disabled.");
         } else {
-            getLogger().warning("Authenticated peer channels are enabled, but replication messages and world application are not implemented.");
+            getLogger().warning("Authenticated peers can submit allowlisted block events for durable receipt; outbound delivery and world application are not implemented.");
         }
     }
 
@@ -220,7 +226,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         sender.sendMessage("§7Peer transport: §f" + (peerConnectionManager == null
                 ? "disabled" : peerConnectionManager.connectedPeerCount() + " authenticated peer(s)"));
         sender.sendMessage("§7Replication: §e" + (peerConnectionManager == null
-                ? "journal capture only" : "authenticated channels only; event delivery unavailable"));
+                ? "journal capture only" : "durable inbound event receipt enabled; outbound delivery and world application unavailable"));
         return true;
     }
 
@@ -301,7 +307,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 maxFrameBytes,
                 maxConnections,
                 handshakeTimeoutMillis,
-                getLogger()
+                getLogger(),
+                new ReplicationMessageHandler(receivedEventStore, Set.copyOf(sharedWorlds))
         );
         InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
         int bindPort = network.getInt("bind-port", 28_120);
@@ -351,15 +358,23 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     }
 
     private void closeJournal() {
-        if (eventJournal == null) {
-            return;
+        if (receivedEventStore != null) {
+            try {
+                receivedEventStore.close();
+            } catch (SQLException exception) {
+                getLogger().log(Level.SEVERE, "Could not close the received-event store cleanly.", exception);
+            } finally {
+                receivedEventStore = null;
+            }
         }
-        try {
-            eventJournal.close();
-        } catch (SQLException exception) {
-            getLogger().log(Level.SEVERE, "Could not close the local event journal cleanly.", exception);
-        } finally {
-            eventJournal = null;
+        if (eventJournal != null) {
+            try {
+                eventJournal.close();
+            } catch (SQLException exception) {
+                getLogger().log(Level.SEVERE, "Could not close the local event journal cleanly.", exception);
+            } finally {
+                eventJournal = null;
+            }
         }
     }
 }

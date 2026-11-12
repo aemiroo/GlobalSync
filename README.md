@@ -6,7 +6,7 @@ The intended experience is that players connect to a nearby regional server whil
 
 ## Current status
 
-**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and an opt-in authenticated peer connection layer. It is not yet a working multi-region world.**
+**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and an opt-in authenticated peer layer with a strict inbound event protocol. It is not yet a working multi-region world.**
 
 Implemented so far:
 
@@ -27,15 +27,18 @@ Implemented so far:
 - Client-side hostname verification and a strict HELLO/READY nonce handshake.
 - Bounded peer connection workers, handshake timeouts, and socket cleanup.
 - Bounded length-prefixed framing (1 MiB maximum).
+- Strict version-1 inbound `EVENT` allowlist for `BLOCK_PLACE` and `BLOCK_BREAK`.
+- Authenticated origin and shared-world validation, with exact message and payload field sets.
+- Separate SQLite inbound inbox (`journal/received.db`) with durable deduplication by event ID and origin sequence.
+- Receiver ACKs only after the inbound inbox transaction commits.
 - A status command and Maven/GitHub Actions verification workflow.
 
-The peer connection layer is deliberately idle after authentication. Any application data sent after the handshake is rejected.
+The peer layer now accepts and durably acknowledges allowlisted inbound block-edit events after authentication. It does not yet send this node's local journal entries or apply received events to the Minecraft world.
 
 Not implemented yet:
 
-- Replication message schemas or application-message exchange.
-- Remote event delivery, acknowledgements, retries, or durable receiver-side deduplication.
-- Applying incoming block changes on another server.
+- Outbound event delivery from the local journal, per-peer ACK cursors, retries, and reconnect replay.
+- Applying durably received block changes on another server.
 - Rollback or compensation if a remote region disagrees with a local edit.
 - Automatic peer reconnection and heartbeat/liveness messages.
 - Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
@@ -43,7 +46,7 @@ Not implemented yet:
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
 - Global commit ordering, consensus, conflict resolution, or replica repair.
 
-Player block edits are currently journaled locally only. They are not transmitted, and a local journal offset is not a global commit index.
+Player block edits are journaled locally. Inbound block events from authenticated peers can be durably stored and acknowledged, but local events are not yet transmitted and received events are not applied to the world. Local journal offsets and received-inbox offsets are database-local, not global commit indexes.
 
 ## Requirements
 
@@ -74,7 +77,7 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 
 ### Controlled peer-connection testing
 
-The network layer is opt-in and currently establishes authenticated idle channels only; it does not replicate world state.
+The network layer is opt-in. It can durably receive and acknowledge allowlisted block-edit events, but does not send local events or apply received changes to world state.
 
 Before enabling it:
 
@@ -88,9 +91,9 @@ Before enabling it:
 
 Each pair uses the lexicographically lower server ID as the outbound dialer. Both nodes must authorize one another by ID and certificate fingerprint. Invalid certificates, unknown IDs, handshake failures, and excess connections are rejected. If the configuration or TLS stores are invalid, GlobalSync disables itself rather than starting with weaker security.
 
-**Do not expose this as a production replication network.** No replication messages, remote world changes, remote commands, file access, plugin loading, or remote configuration changes are implemented. Keep networking disabled outside controlled connection tests.
+**Do not expose this as a production replication network.** No outbound journal delivery or remote world changes are implemented. Remote commands, file access, plugin loading, and remote configuration changes are not part of the protocol. Keep networking disabled outside controlled connection tests.
 
-The local event database is stored at `plugins/GlobalSync/journal/events.db`. Back it up with the server stopped or by using a SQLite-aware backup method.
+The local outgoing event database is stored at `plugins/GlobalSync/journal/events.db`; the durable inbound inbox is `plugins/GlobalSync/journal/received.db`. Back them up with the server stopped or by using a SQLite-aware backup method.
 
 Use `/globalsync status` to inspect the current node, capture state, journal offset, and authenticated peer count.
 
