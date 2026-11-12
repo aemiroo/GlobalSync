@@ -49,6 +49,9 @@ public final class TlsContextFactory {
     public static void requireMutualTls(SSLServerSocket socket) {
         Objects.requireNonNull(socket, "socket");
         socket.setEnabledProtocols(new String[]{"TLSv1.3"});
+        javax.net.ssl.SSLParameters parameters = socket.getSSLParameters();
+        parameters.setEndpointIdentificationAlgorithm("HTTPS");
+        socket.setSSLParameters(parameters);
         socket.setNeedClientAuth(true);
     }
 
