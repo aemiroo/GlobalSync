@@ -41,9 +41,8 @@ Authenticated peers exchange allowlisted block-edit events in both directions. E
 Not implemented yet:
 
 - Applying durably received block changes on another server.
-- Applying durably received block changes on another server.
 - Rollback or compensation if a remote region disagrees with a local edit.
-- Automatic peer reconnection and heartbeat/liveness messages.
+- Heartbeat/liveness messages and peer health metrics.
 - Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
 - Chunk snapshots, entity simulation, and remote player rendering.
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
@@ -78,7 +77,7 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 6. Leave `capture.player-block-changes: true` to journal player block edits, or set it to `false` to disable capture.
 7. Keep `network.enabled: false` unless you are deliberately testing authenticated peer replication between controlled nodes.
 
-### Controlled peer-connection testing
+### Controlled peer-replication testing
 
 The network layer is opt-in. It sends and receives allowlisted block-edit events with durable acknowledgements, but does not apply received changes to world state.
 
