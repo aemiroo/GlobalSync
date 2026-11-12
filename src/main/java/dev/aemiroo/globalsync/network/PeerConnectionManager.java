@@ -9,8 +9,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ArrayBlockingQueue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,6 +33,7 @@ public final class PeerConnectionManager implements AutoCloseable {
     private final Logger logger;
     private final ThreadPoolExecutor connectionWorkers;
     private final Map<String, SSLSocket> connections = new ConcurrentHashMap<>();
+    private final Set<Socket> pendingSockets = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile SSLServerSocket listener;
     private volatile Thread acceptThread;
@@ -49,8 +51,8 @@ public final class PeerConnectionManager implements AutoCloseable {
         this.localServerId = Objects.requireNonNull(localServerId, "localServerId");
         this.authorization = Objects.requireNonNull(authorization, "authorization");
         this.logger = Objects.requireNonNull(logger, "logger");
-        if (localServerId.isBlank() || localServerId.length() > 64) {
-            throw new IllegalArgumentException("localServerId must be non-blank and at most 64 characters");
+        if (!localServerId.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IllegalArgumentException("localServerId must contain only letters, digits, dot, underscore or hyphen");
         }
         if (maxFrameBytes < 4_096 || maxFrameBytes > FrameCodec.DEFAULT_MAX_FRAME_BYTES) {
             throw new IllegalArgumentException("maxFrameBytes must be between 4096 and 1048576");
@@ -69,7 +71,7 @@ public final class PeerConnectionManager implements AutoCloseable {
                 maxConnections,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(maxConnections),
+                new SynchronousQueue<>(),
                 task -> {
                     Thread thread = new Thread(task, "GlobalSync-Peer-Worker");
                     thread.setDaemon(true);
@@ -88,8 +90,9 @@ public final class PeerConnectionManager implements AutoCloseable {
             throw new IllegalStateException("Peer listener is already running");
         }
 
+        SSLServerSocket server = null;
         try {
-            SSLServerSocket server = (SSLServerSocket) tlsContext.getServerSocketFactory().createServerSocket();
+            server = (SSLServerSocket) tlsContext.getServerSocketFactory().createServerSocket();
             TlsContextFactory.requireMutualTls(server);
             server.setReuseAddress(false);
             server.bind(new InetSocketAddress(bindAddress, port), maxConnections);
@@ -99,7 +102,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             acceptThread.start();
         } catch (IOException | RuntimeException exception) {
             running.set(false);
-            closeQuietly(listener);
+            closeQuietly(server);
             listener = null;
             throw exception;
         }
@@ -136,6 +139,7 @@ public final class PeerConnectionManager implements AutoCloseable {
                     closeQuietly(accepted);
                     continue;
                 }
+                pendingSockets.add(sslSocket);
                 submitAccepted(sslSocket);
             } catch (IOException exception) {
                 if (running.get()) {
@@ -149,29 +153,35 @@ public final class PeerConnectionManager implements AutoCloseable {
         try {
             connectionWorkers.execute(() -> authenticateAndHold(socket));
         } catch (java.util.concurrent.RejectedExecutionException exception) {
+            pendingSockets.remove(socket);
             closeQuietly(socket);
             logger.warning("Rejected inbound peer connection because the worker limit was reached.");
         }
     }
 
     private void connectAndHold(PeerEndpoint endpoint) {
-        if (connections.containsKey(endpoint.serverId())) {
+        if (connections.containsKey(endpoint.serverId()) || !running.get()) {
             return;
         }
         Socket plainSocket = new Socket();
+        pendingSockets.add(plainSocket);
         SSLSocket tlsSocket = null;
         try {
             plainSocket.connect(new InetSocketAddress(endpoint.host(), endpoint.port()), handshakeTimeoutMillis);
             tlsSocket = (SSLSocket) tlsContext.getSocketFactory()
                     .createSocket(plainSocket, endpoint.host(), endpoint.port(), true);
+            pendingSockets.remove(plainSocket);
+            pendingSockets.add(tlsSocket);
             TlsContextFactory.configureClientSocket(tlsSocket);
             tlsSocket.setSoTimeout(handshakeTimeoutMillis);
             authenticateAndHold(tlsSocket);
         } catch (IOException | RuntimeException exception) {
             closeQuietly(tlsSocket);
-            closeQuietly(plainSocket);
             logger.warning("Could not authenticate peer " + endpoint.serverId() + ": "
                     + exception.getClass().getSimpleName());
+        } finally {
+            pendingSockets.remove(plainSocket);
+            closeQuietly(plainSocket);
         }
     }
 
@@ -205,6 +215,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             if (peerId != null) {
                 connections.remove(peerId, socket);
             }
+            pendingSockets.remove(socket);
             closeQuietly(socket);
         }
     }
@@ -212,13 +223,15 @@ public final class PeerConnectionManager implements AutoCloseable {
     @Override
     public synchronized void close() {
         if (!running.getAndSet(false)) {
+            connectionWorkers.shutdownNow();
             return;
         }
         closeQuietly(listener);
         listener = null;
-        for (SSLSocket socket : connections.values()) {
+        for (Socket socket : pendingSockets) {
             closeQuietly(socket);
         }
+        pendingSockets.clear();
         connections.clear();
         connectionWorkers.shutdownNow();
         try {
