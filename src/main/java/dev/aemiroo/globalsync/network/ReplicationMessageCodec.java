@@ -68,7 +68,7 @@ public final class ReplicationMessageCodec {
         } catch (IllegalArgumentException exception) {
             throw new IOException("Invalid player UUID", exception);
         }
-        int x = integer(attrs, "x"), y = integer(attrs, "y"), z = integer(attrs, "z");
+        int x = integerText(attrs, "x"), y = integerText(attrs, "y"), z = integerText(attrs, "z");
         String previous = boundedText(attrs, "previous_block_data", 512);
         String next = boundedText(attrs, "new_block_data", 512);
         if ("BLOCK_BREAK".equals(eventType) && !"minecraft:air".equals(next))
@@ -141,6 +141,15 @@ public final class ReplicationMessageCodec {
         long value = longInteger(json, key);
         if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) throw new IOException("Integer out of range: " + key);
         return (int) value;
+    }
+    private static int integerText(JsonObject json, String key) throws IOException {
+        String raw = string(json, key);
+        try {
+            if (!raw.matches("-?(0|[1-9][0-9]*)")) throw new NumberFormatException();
+            return Integer.parseInt(raw);
+        } catch (NumberFormatException exception) {
+            throw new IOException("Invalid coordinate: " + key, exception);
+        }
     }
     private static long longInteger(JsonObject json, String key) throws IOException {
         JsonElement value = json.get(key);
