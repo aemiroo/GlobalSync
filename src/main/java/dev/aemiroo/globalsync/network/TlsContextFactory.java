@@ -49,15 +49,21 @@ public final class TlsContextFactory {
     public static void requireMutualTls(SSLServerSocket socket) {
         Objects.requireNonNull(socket, "socket");
         socket.setEnabledProtocols(new String[]{"TLSv1.3"});
-        javax.net.ssl.SSLParameters parameters = socket.getSSLParameters();
-        parameters.setEndpointIdentificationAlgorithm("HTTPS");
-        socket.setSSLParameters(parameters);
         socket.setNeedClientAuth(true);
     }
 
+    /**
+     * Configure a client socket for TLS 1.3 and certificate hostname verification.
+     * The socket must be created with the intended peer hostname (not only an IP or
+     * an unverified, user-supplied host string) for HTTPS endpoint identification
+     * to validate the correct name during the handshake.
+     */
     public static void configureClientSocket(SSLSocket socket) {
         Objects.requireNonNull(socket, "socket");
         socket.setEnabledProtocols(new String[]{"TLSv1.3"});
+        javax.net.ssl.SSLParameters parameters = socket.getSSLParameters();
+        parameters.setEndpointIdentificationAlgorithm("HTTPS");
+        socket.setSSLParameters(parameters);
     }
 
     private static KeyStore loadStore(Path path, char[] password)
