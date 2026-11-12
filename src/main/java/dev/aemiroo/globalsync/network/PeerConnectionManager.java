@@ -137,9 +137,10 @@ public final class PeerConnectionManager implements AutoCloseable {
     }
 
     private void acceptLoop() {
-        while (running.get()) {
+        SSLServerSocket server = listener;
+        while (running.get() && server != null) {
             try {
-                Socket accepted = listener.accept();
+                Socket accepted = server.accept();
                 if (!(accepted instanceof SSLSocket sslSocket)) {
                     closeQuietly(accepted);
                     continue;
