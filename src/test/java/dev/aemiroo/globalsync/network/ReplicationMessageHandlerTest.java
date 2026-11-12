@@ -59,7 +59,7 @@ class ReplicationMessageHandlerTest {
 
     @Test
     void rejectsUnknownFieldsAndUnsupportedEventTypes() throws Exception {
-        try (SqliteEventJournal journal = new SqliteEventJournal(directory.resolve("events.db"))) {
+        try (SqliteReceivedEventStore journal = new SqliteReceivedEventStore(directory.resolve("received.db"))) {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
             String valid = new String(ReplicationMessageCodec.encodeEvent(event()), StandardCharsets.UTF_8);
             String unknown = valid.substring(0, valid.length() - 1) + ",\"remoteCommand\":\"op *\"}";
@@ -75,7 +75,7 @@ class ReplicationMessageHandlerTest {
 
     @Test
     void rejectsConflictingReuseOfAnEventIdOrOriginSequence() throws Exception {
-        try (SqliteEventJournal journal = new SqliteEventJournal(directory.resolve("events.db"))) {
+        try (SqliteReceivedEventStore journal = new SqliteReceivedEventStore(directory.resolve("received.db"))) {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
             ReplicationEnvelope original = event();
             handler.handle(ReplicationMessageCodec.encodeEvent(original), "region-eu");
