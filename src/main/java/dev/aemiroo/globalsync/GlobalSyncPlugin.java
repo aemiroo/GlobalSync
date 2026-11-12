@@ -1,5 +1,7 @@
 package dev.aemiroo.globalsync;
 
+import dev.aemiroo.globalsync.event.BlockChangeEventListener;
+import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
@@ -20,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
 
 public final class GlobalSyncPlugin extends JavaPlugin {
     private SequenceClock sequenceClock;
@@ -29,6 +32,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     private AtomicLong journalOffset;
     private String serverId;
     private List<String> sharedWorlds;
+    private boolean playerBlockCaptureEnabled;
 
     @Override
     public void onEnable() {
@@ -49,6 +53,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         }
 
         sharedWorlds = List.copyOf(getConfig().getStringList("shared-worlds"));
+        playerBlockCaptureEnabled = getConfig().getBoolean("capture.player-block-changes", true);
+
         try {
             Path journalPath = getDataFolder().toPath().resolve("journal").resolve("events.db");
             Files.createDirectories(journalPath.getParent());
@@ -61,7 +67,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 return thread;
             });
         } catch (IOException | SQLException exception) {
-            getLogger().severe("Could not open the local event journal: " + exception.getMessage());
+            getLogger().log(Level.SEVERE, "Could not open the local event journal.", exception);
             closeJournal();
             Bukkit.getPluginManager().disablePlugin(this);
             return;
@@ -69,11 +75,16 @@ public final class GlobalSyncPlugin extends JavaPlugin {
 
         eventDeduplicator = new EventDeduplicator(16_384);
 
+        if (playerBlockCaptureEnabled) {
+            getServer().getPluginManager().registerEvents(new BlockChangeEventListener(this), this);
+        }
+
         getLogger().info("GlobalSync foundation enabled for node '" + serverId + "'.");
         getLogger().info("Shared-world candidates: " + sharedWorlds);
         getLogger().info("Local journal recovered at offset " + journalOffset.get()
                 + " with node sequence " + sequenceClock.current() + ".");
-        getLogger().warning("Peer transport and world-event capture are not enabled yet; this node is not sharing world state.");
+        getLogger().info("Player block-change capture: " + (playerBlockCaptureEnabled ? "enabled" : "disabled"));
+        getLogger().warning("Peer transport and incoming world-state application are not enabled; events remain local to this node.");
     }
 
     @Override
@@ -125,6 +136,46 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * Called from synchronous Bukkit block events. All Bukkit values are converted
+     * to plain immutable strings before the journal worker touches the event.
+     */
+    public void recordPlayerBlockChange(
+            String eventType,
+            String worldId,
+            java.util.UUID playerId,
+            int x,
+            int y,
+            int z,
+            String previousBlockData,
+            String newBlockData
+    ) {
+        if (!playerBlockCaptureEnabled || sequenceClock == null || !sharedWorlds.contains(worldId)) {
+            return;
+        }
+
+        ReplicationEnvelope envelope = BlockChangeEnvelopeFactory.create(
+                eventType,
+                worldId,
+                serverId,
+                sequenceClock.next(),
+                playerId,
+                x,
+                y,
+                z,
+                previousBlockData,
+                newBlockData
+        );
+
+        appendEvent(envelope).whenComplete((offset, failure) -> {
+            if (failure != null) {
+                getLogger().log(Level.SEVERE, "Could not persist captured block event " + envelope.eventId(), failure);
+            } else {
+                getLogger().fine("Persisted " + eventType + " at journal offset " + offset);
+            }
+        });
+    }
+
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length != 1 || !args[0].equalsIgnoreCase("status")) {
@@ -137,8 +188,9 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         sender.sendMessage("§7Shared worlds: §f" + (sharedWorlds == null ? "[]" : sharedWorlds));
         sender.sendMessage("§7Journal: §a" + (eventJournal == null ? "unavailable" : "ready")
                 + " §7(offset " + (journalOffset == null ? 0 : journalOffset.get()) + ")");
+        sender.sendMessage("§7Block capture: §f" + (playerBlockCaptureEnabled ? "enabled" : "disabled"));
         sender.sendMessage("§7Transport: §cnot connected");
-        sender.sendMessage("§7Replication: §ejournal ready; world-event capture not implemented");
+        sender.sendMessage("§7Replication: §ejournal capture only; remote application unavailable");
         return true;
     }
 
@@ -150,6 +202,10 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         return eventDeduplicator;
     }
 
+    public boolean isSharedWorld(String worldId) {
+        return sharedWorlds != null && sharedWorlds.contains(worldId);
+    }
+
     private void closeJournal() {
         if (eventJournal == null) {
             return;
@@ -157,7 +213,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         try {
             eventJournal.close();
         } catch (SQLException exception) {
-            getLogger().severe("Could not close the local event journal cleanly: " + exception.getMessage());
+            getLogger().log(Level.SEVERE, "Could not close the local event journal cleanly.", exception);
         } finally {
             eventJournal = null;
         }

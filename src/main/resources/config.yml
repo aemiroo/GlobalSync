@@ -3,7 +3,12 @@ server-id: "region-asia"
 shared-worlds:
   - "world"
 
-# Networking is intentionally not enabled in this foundation milestone.
+# Player block edits are written to the local journal. This does not send them
+# to other regions until authenticated peer transport is implemented.
+capture:
+  player-block-changes: true
+
+# Networking is intentionally not enabled in this milestone.
 # Do not expose a future peer transport directly to the public internet.
 network:
   enabled: false

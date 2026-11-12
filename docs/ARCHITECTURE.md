@@ -2,7 +2,7 @@
 
 ## Target topology
 
-Each region runs a Paper 26.3 server and keeps a complete local copy of the shared world. Players connect to the region with the best route from their location. A replication layer distributes committed changes between replicas.
+Each region runs a Paper 26.3 server and keeps a complete local copy of the shared world. Players connect to the region with the best route from their location. Player inventories and player sessions remain independent. The long-term design includes global chat, cross-region PvP, synchronized knockback, and replicated world state.
 
 A complete copy on every node does not mean every node should independently simulate every object. That would cause divergent mob AI, random ticks, fluids, redstone, and entity movement.
 
@@ -21,6 +21,12 @@ A future implementation must define:
 7. A clear policy for partitions: pause or reject writes that cannot be safely ordered instead of allowing split-brain state.
 
 Each node now has a local SQLite journal with a monotonically increasing local offset. That offset is useful for replaying one node's journal, but it is not a global sequence and does not imply replication or commitment by another region. The per-node event sequence is restored from this journal after restart.
+
+## Capture boundary
+
+The first Paper event integration records successful player block placements and breaks in configured shared worlds. Multi-block placements are expanded into individual location-specific events. Event data is copied into immutable strings and UUIDs on the server thread; SQLite persistence is queued to the dedicated journal worker.
+
+This does not yet cover environmental simulation, block entities, inventories, redstone, fluids, pistons, explosions, or any other indirect world changes. It is a capture milestone, not a complete world replication model.
 
 ## Threading
 

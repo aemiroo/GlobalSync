@@ -17,6 +17,19 @@ Every replicated event should carry:
 
 The ReplicationEnvelope record captures this metadata. Its attributes map is a temporary lightweight placeholder; production events should use typed, schema-versioned payloads.
 
+## Captured player block edits
+
+The current Bukkit integration captures successful player block placements and breaks in worlds listed under `shared-worlds`.
+
+- `BLOCK_PLACE` records the replaced block data and the resulting placed block data.
+- `BLOCK_BREAK` records the previous block data and the expected `minecraft:air` result.
+- Every event includes the world-local integer coordinates and the acting player's UUID.
+- `BlockMultiPlaceEvent` is expanded into one event per replaced block, so multi-block placements such as beds are not reduced to a single coordinate.
+- Handlers run at MONITOR priority and ignore cancelled events. They do not change the world or cancel gameplay.
+- Block data is serialized using Bukkit's block-data string representation.
+
+This first capture pass intentionally does not include explosions, piston movement, fluids, redstone, growth, containers, block entities, or other environmental changes. It also does not yet transmit or apply captured events on another server.
+
 ## Local journal
 
 Each node writes accepted outgoing events to its own SQLite journal before attempting network delivery. The journal uses WAL mode and FULL synchronous commits. A successful append returns a local journal offset only after SQLite has committed the transaction.

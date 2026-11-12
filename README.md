@@ -6,30 +6,35 @@ The intended experience is that players connect to a nearby regional server whil
 
 ## Current status
 
-**This repository contains the initial 26.3 plugin foundation and the first durable replication primitive. It is not yet a working multi-region world.**
+**This repository contains a 26.3 plugin foundation, a durable local event journal, and initial player block-edit capture. It is not yet a working multi-region world.**
 
 Implemented so far:
 
 - Paper 26.3 plugin entry point and strict Minecraft version guard.
 - Unique regional node identity and shared-world configuration.
-- A versioned replication event envelope.
+- Versioned replication event envelopes.
 - Local sequence generation restored from the durable journal after restart.
 - SQLite append-only event journal using WAL mode and full synchronous commits.
 - Idempotent retry handling and conflict detection for reused event IDs or node sequences.
 - Bounded journal replay by local offset.
 - Asynchronous journal append API so callers do not perform disk I/O on the Paper main thread.
+- Capture of successful player block placements and breaks in configured shared worlds.
+- Multi-block player placements (such as beds) are recorded as individual block changes.
+- Before/after block data, world coordinates, player UUID, origin node, and sequence are stored in each event.
+- Capture can be disabled with `capture.player-block-changes`.
 - A status command and Maven/GitHub Actions verification workflow.
 
 Not implemented yet:
 
 - Peer discovery, authenticated network transport, or remote event delivery.
-- Bukkit world-event capture and application of incoming events.
-- Remote player entity spawning and movement replication.
-- Chunk snapshots, block/container/redstone replication, or entity simulation.
+- Applying incoming block changes on another server.
+- Rollback or compensation if a remote region disagrees with a local edit.
+- Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
+- Chunk snapshots, entity simulation, and remote player rendering.
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
 - Global commit ordering, consensus, conflict resolution, or replica repair.
 
-The journal is a durable local history for one node. Its offset is local to that database and must not be treated as a global sequence or proof that another region has received an event.
+Player block edits are currently journaled locally only. They are not transmitted, and a local journal offset is not a global commit index.
 
 ## Requirements
 
@@ -55,15 +60,12 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 3. Start the server once to generate `plugins/GlobalSync/config.yml` and the local journal database.
 4. Set a unique `server-id` for each region.
 5. Ensure the intended world names appear under `shared-worlds`.
-6. Restart the server.
+6. Leave `capture.player-block-changes: true` to journal player block edits, or set it to `false` to disable capture.
+7. Restart the server.
 
 The local event database is stored at `plugins/GlobalSync/journal/events.db`. Back it up with the server stopped or by using a SQLite-aware backup method.
 
-Use `/globalsync status` to inspect the current node and journal status.
-
-## Configuration
-
-`shared-worlds` lists world names intended for future replication. The network section is reserved for the transport milestone and is disabled by default. Do not expose an unauthenticated listener to the public internet.
+Use `/globalsync status` to inspect the current node, capture state, and journal offset.
 
 See [the architecture notes](docs/ARCHITECTURE.md) for consistency goals and [the protocol notes](docs/PROTOCOL.md) for the event contract.
 
