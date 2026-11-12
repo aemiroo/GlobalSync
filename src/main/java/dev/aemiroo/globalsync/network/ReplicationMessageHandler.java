@@ -1,6 +1,7 @@
 package dev.aemiroo.globalsync.network;
 
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
+import dev.aemiroo.globalsync.replication.JournalConflictException;
 import dev.aemiroo.globalsync.replication.SqliteReceivedEventStore;
 
 import java.io.IOException;
@@ -23,7 +24,7 @@ public final class ReplicationMessageHandler {
             var receipt = receivedEvents.accept(event);
             // ACK is sent only after the durable inbox transaction has committed.
             return ReplicationMessageCodec.encodeAck(event.eventId(), receipt.offset());
-        } catch (SQLException exception) {
+        } catch (SQLException | JournalConflictException exception) {
             throw new IOException("Could not durably accept replication event", exception);
         }
     }
