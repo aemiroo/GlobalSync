@@ -19,7 +19,7 @@
   <dependencies>
     <dependency>
       <groupId>io.papermc.paper</groupId><artifactId>paper-api</artifactId>
-      <version>26.3.build.242-stable</version><scope>provided</scope>
+      <version>26.3.build.246-stable</version><scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.xerial</groupId><artifactId>sqlite-jdbc</artifactId>
