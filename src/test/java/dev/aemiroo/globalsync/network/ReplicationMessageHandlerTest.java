@@ -65,6 +65,9 @@ class ReplicationMessageHandlerTest {
             String unknown = valid.substring(0, valid.length() - 1) + ",\"remoteCommand\":\"op *\"}";
             assertThrows(java.io.IOException.class, () -> handler.handle(
                     unknown.getBytes(StandardCharsets.UTF_8), "region-eu"));
+            String duplicateKey = valid.replaceFirst("\\\"type\\\":\\\"EVENT\\\"", "\\\"type\\\":\\\"EVENT\\\",\\\"type\\\":\\\"EVENT\\\"");
+            assertThrows(java.io.IOException.class, () -> handler.handle(
+                    duplicateKey.getBytes(StandardCharsets.UTF_8), "region-eu"));
             ReplicationEnvelope unsupported = new ReplicationEnvelope(1, UUID.randomUUID(), "world",
                     "region-eu", 3, Instant.now(), "ENTITY_TELEPORT", Map.of());
             assertThrows(java.io.IOException.class, () -> handler.handle(
