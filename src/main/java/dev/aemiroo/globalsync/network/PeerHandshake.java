@@ -46,6 +46,7 @@ public final class PeerHandshake {
 
         JsonObject remoteHello = read(socket, maxFrameBytes);
         requireExactFields(remoteHello, HELLO_FIELDS);
+        requireCanonicalHello(remoteHello);
         if (!"HELLO".equals(string(remoteHello, "type"))
                 || integer(remoteHello, "protocolVersion") != PROTOCOL_VERSION) {
             throw new IOException("Peer protocol handshake is incompatible");
@@ -69,6 +70,7 @@ public final class PeerHandshake {
 
         JsonObject remoteReady = read(socket, maxFrameBytes);
         requireExactFields(remoteReady, READY_FIELDS);
+        requireCanonicalReady(remoteReady);
         if (!"READY".equals(string(remoteReady, "type"))
                 || !localNonce.equals(string(remoteReady, "nonce"))) {
             throw new SSLPeerUnverifiedException("Peer did not confirm this connection's handshake nonce");
@@ -100,6 +102,26 @@ public final class PeerHandshake {
     private static void requireExactFields(JsonObject object, Set<String> expected) throws IOException {
         if (!object.keySet().equals(expected)) {
             throw new IOException("Peer handshake contains missing or unknown fields");
+        }
+    }
+
+    private static void requireCanonicalHello(JsonObject object) throws IOException {
+        JsonObject canonical = new JsonObject();
+        canonical.addProperty("type", string(object, "type"));
+        canonical.addProperty("protocolVersion", integer(object, "protocolVersion"));
+        canonical.addProperty("serverId", string(object, "serverId"));
+        canonical.addProperty("nonce", string(object, "nonce"));
+        if (!canonical.equals(object)) {
+            throw new IOException("Peer HELLO message is not canonical");
+        }
+    }
+
+    private static void requireCanonicalReady(JsonObject object) throws IOException {
+        JsonObject canonical = new JsonObject();
+        canonical.addProperty("type", string(object, "type"));
+        canonical.addProperty("nonce", string(object, "nonce"));
+        if (!canonical.equals(object)) {
+            throw new IOException("Peer READY message is not canonical");
         }
     }
 
