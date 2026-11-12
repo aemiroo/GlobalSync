@@ -6,7 +6,7 @@ The intended experience is that players connect to a nearby regional server whil
 
 ## Current status
 
-**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and an opt-in authenticated peer layer with a strict inbound event protocol. It is not yet a working multi-region world.**
+**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and an opt-in authenticated peer layer with bidirectional durable event delivery. It is not yet a working multi-region world.**
 
 Implemented so far:
 
@@ -31,13 +31,16 @@ Implemented so far:
 - Authenticated origin and shared-world validation, with exact message and payload field sets.
 - Separate SQLite inbound inbox (`journal/received.db`) with durable deduplication by event ID and origin sequence.
 - Receiver ACKs only after the inbound inbox transaction commits.
+- Bidirectional stop-and-wait delivery from each node's local journal, with one outstanding event per peer.
+- Per-peer local journal acknowledgement cursors persisted in SQLite and resumed after restart.
+- Bounded exponential reconnect attempts; timed-out sends are retried and safely deduplicated by the receiver.
 - A status command and Maven/GitHub Actions verification workflow.
 
-The peer layer now accepts and durably acknowledges allowlisted inbound block-edit events after authentication. It does not yet send this node's local journal entries or apply received events to the Minecraft world.
+Authenticated peers exchange allowlisted block-edit events in both directions. Each sender advances its durable per-peer cursor only after receiving an ACK for the exact event; the receiver sends that ACK only after committing the event to its inbox. A disconnect or lost ACK causes replay from the last persisted cursor. Received events are still not applied to the Minecraft world.
 
 Not implemented yet:
 
-- Outbound event delivery from the local journal, per-peer ACK cursors, retries, and reconnect replay.
+- Applying durably received block changes on another server.
 - Applying durably received block changes on another server.
 - Rollback or compensation if a remote region disagrees with a local edit.
 - Automatic peer reconnection and heartbeat/liveness messages.
@@ -46,7 +49,7 @@ Not implemented yet:
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
 - Global commit ordering, consensus, conflict resolution, or replica repair.
 
-Player block edits are journaled locally. Inbound block events from authenticated peers can be durably stored and acknowledged, but local events are not yet transmitted and received events are not applied to the world. Local journal offsets and received-inbox offsets are database-local, not global commit indexes.
+Player block edits are journaled locally. Local block events are delivered to authenticated peers and acknowledged durably. Received events are stored in the inbox but are not applied to the world. Local journal offsets and received-inbox offsets are database-local, not global commit indexes.
 
 ## Requirements
 
@@ -73,11 +76,11 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 4. Set a unique `server-id` for each region.
 5. Ensure the intended world names appear under `shared-worlds`.
 6. Leave `capture.player-block-changes: true` to journal player block edits, or set it to `false` to disable capture.
-7. Keep `network.enabled: false` unless you are deliberately testing the authenticated connection layer.
+7. Keep `network.enabled: false` unless you are deliberately testing authenticated peer replication between controlled nodes.
 
 ### Controlled peer-connection testing
 
-The network layer is opt-in. It can durably receive and acknowledge allowlisted block-edit events, but does not send local events or apply received changes to world state.
+The network layer is opt-in. It sends and receives allowlisted block-edit events with durable acknowledgements, but does not apply received changes to world state.
 
 Before enabling it:
 
@@ -91,7 +94,7 @@ Before enabling it:
 
 Each pair uses the lexicographically lower server ID as the outbound dialer. Both nodes must authorize one another by ID and certificate fingerprint. Invalid certificates, unknown IDs, handshake failures, and excess connections are rejected. If the configuration or TLS stores are invalid, GlobalSync disables itself rather than starting with weaker security.
 
-**Do not expose this as a production replication network.** No outbound journal delivery or remote world changes are implemented. Remote commands, file access, plugin loading, and remote configuration changes are not part of the protocol. Keep networking disabled outside controlled connection tests.
+**Do not expose this as a production replication network.** Remote world changes are not implemented. Remote commands, file access, plugin loading, and remote configuration changes are not part of the protocol. Keep networking disabled outside controlled replication tests.
 
 The local outgoing event database is stored at `plugins/GlobalSync/journal/events.db`; the durable inbound inbox is `plugins/GlobalSync/journal/received.db`. Back them up with the server stopped or by using a SQLite-aware backup method.
 
