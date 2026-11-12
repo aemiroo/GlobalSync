@@ -1,6 +1,10 @@
 package dev.aemiroo.globalsync;
 
 import dev.aemiroo.globalsync.event.BlockChangeEventListener;
+import dev.aemiroo.globalsync.network.PeerAuthorizationRegistry;
+import dev.aemiroo.globalsync.network.PeerConnectionManager;
+import dev.aemiroo.globalsync.network.PeerEndpoint;
+import dev.aemiroo.globalsync.network.TlsContextFactory;
 import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
@@ -9,12 +13,18 @@ import dev.aemiroo.globalsync.replication.SqliteEventJournal;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -30,6 +40,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     private SqliteEventJournal eventJournal;
     private ExecutorService journalExecutor;
     private AtomicLong journalOffset;
+    private PeerConnectionManager peerConnectionManager;
     private String serverId;
     private List<String> sharedWorlds;
     private boolean playerBlockCaptureEnabled;
@@ -46,8 +57,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         }
 
         serverId = getConfig().getString("server-id", "").trim();
-        if (serverId.isBlank() || serverId.equalsIgnoreCase("change-me")) {
-            getLogger().severe("Set a unique server-id in config.yml before enabling GlobalSync.");
+        if (serverId.isBlank() || serverId.equalsIgnoreCase("change-me") || serverId.length() > 64) {
+            getLogger().severe("Set a unique server-id (1-64 characters) in config.yml before enabling GlobalSync.");
             Bukkit.getPluginManager().disablePlugin(this);
             return;
         }
@@ -73,8 +84,18 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             return;
         }
 
-        eventDeduplicator = new EventDeduplicator(16_384);
+        try {
+            startPeerNetworkingIfEnabled();
+        } catch (IOException | GeneralSecurityException | RuntimeException exception) {
+            getLogger().log(Level.SEVERE,
+                    "Peer networking configuration or startup failed. GlobalSync will fail closed.", exception);
+            closePeerNetworking();
+            closeJournal();
+            Bukkit.getPluginManager().disablePlugin(this);
+            return;
+        }
 
+        eventDeduplicator = new EventDeduplicator(16_384);
         if (playerBlockCaptureEnabled) {
             getServer().getPluginManager().registerEvents(new BlockChangeEventListener(this), this);
         }
@@ -84,22 +105,28 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         getLogger().info("Local journal recovered at offset " + journalOffset.get()
                 + " with node sequence " + sequenceClock.current() + ".");
         getLogger().info("Player block-change capture: " + (playerBlockCaptureEnabled ? "enabled" : "disabled"));
-        getLogger().warning("Peer transport and incoming world-state application are not enabled; events remain local to this node.");
+        if (peerConnectionManager == null) {
+            getLogger().info("Peer networking is disabled.");
+        } else {
+            getLogger().warning("Authenticated peer channels are enabled, but replication messages and world application are not implemented.");
+        }
     }
 
     @Override
     public void onDisable() {
+        closePeerNetworking();
         if (journalExecutor != null) {
             journalExecutor.shutdown();
             try {
                 if (!journalExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    getLogger().warning("Journal worker did not stop in time; leaving its connection for process shutdown.");
-                    return;
+                    getLogger().warning("Journal worker did not stop in time; requesting shutdown.");
+                    journalExecutor.shutdownNow();
+                    journalExecutor.awaitTermination(1, TimeUnit.SECONDS);
                 }
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
+                journalExecutor.shutdownNow();
                 getLogger().warning("Interrupted while waiting for the journal worker to stop.");
-                return;
             }
         }
         closeJournal();
@@ -189,8 +216,10 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         sender.sendMessage("§7Journal: §a" + (eventJournal == null ? "unavailable" : "ready")
                 + " §7(offset " + (journalOffset == null ? 0 : journalOffset.get()) + ")");
         sender.sendMessage("§7Block capture: §f" + (playerBlockCaptureEnabled ? "enabled" : "disabled"));
-        sender.sendMessage("§7Transport: §cnot connected");
-        sender.sendMessage("§7Replication: §ejournal capture only; remote application unavailable");
+        sender.sendMessage("§7Peer transport: §f" + (peerConnectionManager == null
+                ? "disabled" : peerConnectionManager.connectedPeerCount() + " authenticated peer(s)"));
+        sender.sendMessage("§7Replication: §e" + (peerConnectionManager == null
+                ? "journal capture only" : "authenticated channels only; event delivery unavailable"));
         return true;
     }
 
@@ -204,6 +233,114 @@ public final class GlobalSyncPlugin extends JavaPlugin {
 
     public boolean isSharedWorld(String worldId) {
         return sharedWorlds != null && sharedWorlds.contains(worldId);
+    }
+
+    private void startPeerNetworkingIfEnabled() throws IOException, GeneralSecurityException {
+        ConfigurationSection network = getConfig().getConfigurationSection("network");
+        if (network == null || !network.getBoolean("enabled", false)) {
+            return;
+        }
+
+        ConfigurationSection peersSection = network.getConfigurationSection("peers");
+        if (peersSection == null) {
+            throw new IllegalArgumentException("network.peers must contain at least one authorized peer");
+        }
+        List<PeerEndpoint> peers = new ArrayList<>();
+        for (String peerId : peersSection.getKeys(false)) {
+            ConfigurationSection peer = peersSection.getConfigurationSection(peerId);
+            if (peer == null) {
+                throw new IllegalArgumentException("Peer configuration must be a section: " + peerId);
+            }
+            if (serverId.equals(peerId)) {
+                throw new IllegalArgumentException("A node cannot authorize itself as a remote peer");
+            }
+            peers.add(new PeerEndpoint(
+                    peerId,
+                    peer.getString("host", ""),
+                    peer.getInt("port", -1),
+                    peer.getString("fingerprint", "")
+            ));
+        }
+        if (peers.isEmpty()) {
+            throw new IllegalArgumentException("network.peers must contain at least one authorized peer");
+        }
+
+        ConfigurationSection tls = network.getConfigurationSection("tls");
+        if (tls == null) {
+            throw new IllegalArgumentException("network.tls configuration is required");
+        }
+        String identityPasswordEnv = tls.getString("identity-store-password-env", "");
+        String trustPasswordEnv = tls.getString("trust-store-password-env", "");
+        char[] identityPassword = requireEnvironmentSecret(identityPasswordEnv);
+        char[] trustPassword = requireEnvironmentSecret(trustPasswordEnv);
+        SSLContext tlsContext;
+        try {
+            Path identityStore = resolveTlsStore(tls.getString("identity-store", ""));
+            Path trustStore = resolveTlsStore(tls.getString("trust-store", ""));
+            tlsContext = TlsContextFactory.create(identityStore, identityPassword, trustStore, trustPassword);
+        } finally {
+            Arrays.fill(identityPassword, '\0');
+            Arrays.fill(trustPassword, '\0');
+        }
+
+        int maxFrameBytes = network.getInt("max-frame-bytes", 1_048_576);
+        int maxConnections = network.getInt("max-connections", 16);
+        int handshakeTimeoutMillis = network.getInt("handshake-timeout-ms", 5_000);
+        PeerAuthorizationRegistry authorization = new PeerAuthorizationRegistry(peers);
+        peerConnectionManager = new PeerConnectionManager(
+                tlsContext,
+                serverId,
+                authorization,
+                maxFrameBytes,
+                maxConnections,
+                handshakeTimeoutMillis,
+                getLogger()
+        );
+        InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
+        int bindPort = network.getInt("bind-port", 28_120);
+        peerConnectionManager.start(bindAddress, bindPort);
+        peerConnectionManager.connectConfiguredPeers();
+        getLogger().info("Peer listener started on " + bindAddress.getHostAddress() + ":" + bindPort
+                + " with " + peers.size() + " explicitly authorized peer(s).");
+    }
+
+    private Path resolveTlsStore(String configuredPath) throws IOException {
+        if (configuredPath == null || configuredPath.isBlank()) {
+            throw new IllegalArgumentException("TLS store path must not be blank");
+        }
+        Path dataFolder = getDataFolder().toPath().toAbsolutePath().normalize();
+        Path configured = Path.of(configuredPath);
+        if (configured.isAbsolute()) {
+            throw new IllegalArgumentException("TLS stores must be inside the GlobalSync data directory");
+        }
+        Path resolved = dataFolder.resolve(configured).normalize();
+        if (!resolved.startsWith(dataFolder)) {
+            throw new IllegalArgumentException("TLS store path escapes the GlobalSync data directory");
+        }
+        Path realDataFolder = dataFolder.toRealPath();
+        Path realStore = resolved.toRealPath();
+        if (!realStore.startsWith(realDataFolder) || !Files.isRegularFile(realStore)) {
+            throw new IllegalArgumentException("TLS store must be a regular file inside the GlobalSync data directory");
+        }
+        return realStore;
+    }
+
+    private static char[] requireEnvironmentSecret(String variableName) {
+        if (variableName == null || !variableName.matches("[A-Z_][A-Z0-9_]{0,127}")) {
+            throw new IllegalArgumentException("TLS password environment variable name is invalid");
+        }
+        String value = System.getenv(variableName);
+        if (value == null || value.isEmpty()) {
+            throw new IllegalArgumentException("Required TLS password environment variable is not set: " + variableName);
+        }
+        return value.toCharArray();
+    }
+
+    private void closePeerNetworking() {
+        if (peerConnectionManager != null) {
+            peerConnectionManager.close();
+            peerConnectionManager = null;
+        }
     }
 
     private void closeJournal() {
