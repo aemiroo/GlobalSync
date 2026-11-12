@@ -1,0 +1,12 @@
+# Give every regional server a unique, stable ID.
+server-id: "region-asia"
+shared-worlds:
+  - "world"
+
+# Networking is intentionally not enabled in this foundation milestone.
+# Do not expose a future peer transport directly to the public internet.
+network:
+  enabled: false
+  bind-address: "127.0.0.1"
+  bind-port: 28120
+  shared-secret: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
