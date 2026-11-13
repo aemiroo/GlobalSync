@@ -35,6 +35,7 @@ Implemented so far:
 - Authenticated origin and shared-world validation, with exact message and payload field sets.
 - Separate SQLite inbound inbox (`journal/received.db`) with durable deduplication by event ID and origin sequence.
 - Authenticated snapshot-transfer receiver with strict manifest/chunk validation and isolated, durable staging; staged snapshots are not installed into live worlds.
+- Stop-and-wait outbound snapshot sender for caller-supplied completed payloads, with local file, length, and SHA-256 checks and exact per-chunk acknowledgements.
 - Receiver ACKs only after the inbound inbox transaction commits.
 - Bidirectional stop-and-wait delivery from each node's local journal, with one outstanding event per peer.
 - Per-peer local journal acknowledgement cursors persisted in SQLite and resumed after restart.
@@ -86,7 +87,7 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 
 ### Controlled peer-replication testing
 
-The network and world-application layers are independently opt-in. The network exchanges allowlisted block-edit events, targeted gap-repair messages, and bounded snapshot-staging messages. A completed snapshot transfer means only that the opaque payload was durably staged and SHA-256 verified; it does not mean the world was changed. With `application.enabled: true`, winning edits are applied on the Paper main thread; unloaded chunks are not force-loaded.
+The network and world-application layers are independently opt-in. The network exchanges allowlisted block-edit events, targeted gap-repair messages, and bounded snapshot staging and transfer messages. A completed snapshot transfer means only that the opaque payload was durably staged and SHA-256 verified; it does not mean the world was changed. With `application.enabled: true`, winning edits are applied on the Paper main thread; unloaded chunks are not force-loaded.
 
 Before enabling it:
 
@@ -112,6 +113,6 @@ See [the architecture notes](docs/ARCHITECTURE.md), [the protocol notes](docs/PR
 World-local snapshot coverage is tracked separately from the global per-origin delivery sequence. Only events durably marked `APPLIED` contribute to a contiguous per-world/per-origin watermark; legacy rows without a trustworthy world-local sequence are excluded.
 
 
-The snapshot work currently includes a bounded, loaded-chunk capture primitive only. It samples immutable chunk snapshots over multiple ticks and deliberately does not publish or install them: a consistency/reconciliation protocol is still required before any capture can be treated as a valid world snapshot.
+The snapshot work includes a bounded loaded-chunk capture primitive, durable applied-event history, and a deterministic reconciliation primitive. The transfer layer can send a completed payload supplied by a caller, but no capture-to-manifest producer or command creates these payloads yet. Snapshots remain non-publishable until that lifecycle exists.
 
 Snapshot consistency groundwork now keeps an append-only record of successfully applied block events, including effects later superseded in the inbox, and provides a deterministic reconciler for chunk scans. The capture-to-manifest pipeline is not wired yet; no snapshot is advertised as complete by this milestone.

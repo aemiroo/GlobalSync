@@ -3,12 +3,20 @@ package dev.aemiroo.globalsync.network;
 import dev.aemiroo.globalsync.replication.JournalEntry;
 import dev.aemiroo.globalsync.replication.PeerReplicationProgress;
 import dev.aemiroo.globalsync.replication.SqliteEventJournal;
+import dev.aemiroo.globalsync.replication.SnapshotManifest;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -54,6 +62,7 @@ public final class PeerConnectionManager implements AutoCloseable {
     private final SqliteEventJournal eventJournal;
     private final ThreadPoolExecutor connectionWorkers;
     private final ThreadPoolExecutor deliveryWorkers;
+    private final ThreadPoolExecutor snapshotWorkers;
     private final ScheduledExecutorService heartbeatWorker;
     private final PeerMessageRateLimiter controlRateLimiter =
             new PeerMessageRateLimiter(64, 10.0, 20.0, 16_384.0, 32_768.0);
@@ -139,6 +148,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         this.heartbeatTimeoutMillis = heartbeatTimeoutMillis;
         this.connectionWorkers = workerPool(maxConnections, "GlobalSync-Peer-Worker");
         this.deliveryWorkers = workerPool(maxConnections, "GlobalSync-Delivery-Worker");
+        this.snapshotWorkers = workerPool(maxConnections, "GlobalSync-Snapshot-Sender");
         this.heartbeatWorker = Executors.newSingleThreadScheduledExecutor(task -> {
             Thread thread = new Thread(task, "GlobalSync-Heartbeat");
             thread.setDaemon(true);
@@ -209,6 +219,177 @@ public final class PeerConnectionManager implements AutoCloseable {
     public boolean isConnected(String peerServerId) {
         PeerSession session = connections.get(peerServerId);
         return session != null && session.isOpen();
+    }
+
+    /**
+     * Sends a previously completed snapshot payload to one authenticated,
+     * explicitly configured peer. The request ID is supplied by the caller so
+     * an interrupted transfer can resume with the receiver's durable staging
+     * record. This method never exposes a remote filesystem path.
+     */
+    public CompletableFuture<Void> sendSnapshot(
+            String peerServerId, SnapshotManifest manifest, UUID requestId, Path payloadFile) {
+        Objects.requireNonNull(manifest, "manifest");
+        Objects.requireNonNull(requestId, "requestId");
+        Objects.requireNonNull(payloadFile, "payloadFile");
+        if (!running.get()) return CompletableFuture.failedFuture(new IOException("Peer networking is not running"));
+        if (snapshotStagingStore == null || messageHandler == null)
+            return CompletableFuture.failedFuture(new IOException("Snapshot transfer is not enabled"));
+        if (!localServerId.equals(manifest.sourceServerId()))
+            return CompletableFuture.failedFuture(new IOException("Snapshot source does not match this server"));
+        if (!messageHandler.sharedWorlds().contains(manifest.worldId()))
+            return CompletableFuture.failedFuture(new IOException("Snapshot world is not configured for sharing"));
+        PeerSession session = connections.get(peerServerId);
+        if (session == null || !session.isOpen())
+            return CompletableFuture.failedFuture(new IOException("Snapshot peer is not connected"));
+        if (authorization.peers().stream().noneMatch(peer -> peer.serverId().equals(peerServerId)))
+            return CompletableFuture.failedFuture(new IOException("Snapshot peer is not explicitly authorized"));
+
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        try {
+            snapshotWorkers.execute(() -> {
+                try {
+                    sendSnapshotOnSession(session, manifest, requestId, payloadFile);
+                    result.complete(null);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    result.completeExceptionally(exception);
+                    session.close();
+                } catch (SnapshotRejectedException exception) {
+                    result.completeExceptionally(exception);
+                } catch (IOException | RuntimeException exception) {
+                    result.completeExceptionally(exception);
+                    session.close();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException exception) {
+            result.completeExceptionally(new IOException("Snapshot sender capacity is full", exception));
+        }
+        return result;
+    }
+
+    private void sendSnapshotOnSession(
+            PeerSession session, SnapshotManifest manifest, UUID requestId, Path payloadFile)
+            throws IOException, InterruptedException {
+        ActiveSnapshotTransfer transfer = new ActiveSnapshotTransfer(
+                requestId, UUID.fromString(manifest.snapshotId()), manifest);
+        if (!session.outboundSnapshotTransfer.compareAndSet(null, transfer))
+            throw new IOException("A snapshot is already being sent to this peer");
+        try (FileChannel payload = openVerifiedPayload(payloadFile, manifest)) {
+            SnapshotTransferMessage.Message response = sendSnapshotFrame(
+                    session, transfer, Set.of(SnapshotTransferMessage.Type.ACCEPT,
+                            SnapshotTransferMessage.Type.COMPLETE),
+                    -1, SnapshotTransferMessage.encodeOffer(requestId, manifest));
+            rejectSnapshotIfNeeded(response);
+            if (response.type() == SnapshotTransferMessage.Type.COMPLETE) return;
+            if (response.type() != SnapshotTransferMessage.Type.ACCEPT)
+                throw new IOException("Peer returned an unexpected snapshot-offer response");
+
+            long offset = 0;
+            long chunkIndex = 0;
+            while (offset < manifest.contentLengthBytes()) {
+                int length = (int) Math.min(SnapshotTransferMessage.CHUNK_BYTES,
+                        manifest.contentLengthBytes() - offset);
+                ByteBuffer buffer = ByteBuffer.allocate(length);
+                while (buffer.hasRemaining()) {
+                    int read = payload.read(buffer, offset + buffer.position());
+                    if (read < 0) throw new IOException("Snapshot payload changed or ended during transfer");
+                    if (read == 0) continue;
+                }
+                byte[] data = buffer.array();
+                response = sendSnapshotFrame(
+                        session, transfer, Set.of(SnapshotTransferMessage.Type.CHUNK_ACK), chunkIndex,
+                        SnapshotTransferMessage.encodeChunk(requestId, transfer.snapshotId, chunkIndex, data));
+                rejectSnapshotIfNeeded(response);
+                if (response.type() != SnapshotTransferMessage.Type.CHUNK_ACK)
+                    throw new IOException("Peer returned an unexpected snapshot-chunk response");
+                offset += length;
+                chunkIndex++;
+            }
+
+            if (payload.size() != manifest.contentLengthBytes())
+                throw new IOException("Snapshot payload length changed during transfer");
+            response = sendSnapshotFrame(
+                    session, transfer, Set.of(SnapshotTransferMessage.Type.COMPLETE), -1,
+                    SnapshotTransferMessage.encodeFinish(requestId, transfer.snapshotId));
+            rejectSnapshotIfNeeded(response);
+            if (response.type() != SnapshotTransferMessage.Type.COMPLETE)
+                throw new IOException("Peer did not confirm completed snapshot staging");
+            logger.info("Snapshot payload was durably staged and verified by " + session.peerId
+                    + " (" + transfer.snapshotId + "). It has not been installed.");
+        } finally {
+            session.outboundSnapshotTransfer.compareAndSet(transfer, null);
+        }
+    }
+
+    private SnapshotTransferMessage.Message sendSnapshotFrame(
+            PeerSession session, ActiveSnapshotTransfer transfer,
+            Set<SnapshotTransferMessage.Type> expectedTypes, long expectedChunkIndex, byte[] frame)
+            throws IOException, InterruptedException {
+        PendingSnapshotResponse pending = new PendingSnapshotResponse(
+                transfer.requestId, transfer.snapshotId, expectedTypes, expectedChunkIndex);
+        if (!session.pendingSnapshotResponse.compareAndSet(null, pending))
+            throw new IOException("Another snapshot response is already pending");
+        try {
+            session.write(frame);
+            return pending.future.get(acknowledgementTimeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException exception) {
+            throw new IOException("Peer snapshot response timed out", exception);
+        } catch (ExecutionException exception) {
+            throw new IOException("Peer session ended before its snapshot response", exception.getCause());
+        } finally {
+            session.pendingSnapshotResponse.compareAndSet(pending, null);
+        }
+    }
+
+    private static void rejectSnapshotIfNeeded(SnapshotTransferMessage.Message response)
+            throws SnapshotRejectedException {
+        if (response.type() == SnapshotTransferMessage.Type.REJECT)
+            throw new SnapshotRejectedException("Peer rejected snapshot offer: " + response.rejectReason());
+    }
+
+    private static FileChannel openVerifiedPayload(Path payloadFile, SnapshotManifest manifest)
+            throws IOException {
+        Path absolute = payloadFile.toAbsolutePath().normalize();
+        Path current = absolute.getRoot();
+        for (Path component : absolute) {
+            current = current.resolve(component);
+            if (java.nio.file.Files.isSymbolicLink(current))
+                throw new IOException("Snapshot payload path contains a symbolic link");
+        }
+        if (!java.nio.file.Files.isRegularFile(absolute, LinkOption.NOFOLLOW_LINKS))
+            throw new IOException("Snapshot payload is not a regular file");
+        FileChannel channel = FileChannel.open(absolute, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        boolean valid = false;
+        try {
+            if (manifest.contentLengthBytes() > SnapshotStagingStore.MAX_SNAPSHOT_BYTES
+                    || channel.size() != manifest.contentLengthBytes())
+                throw new IOException("Snapshot payload length is outside the local transfer policy");
+            MessageDigest digest;
+            try { digest = MessageDigest.getInstance("SHA-256"); }
+            catch (NoSuchAlgorithmException exception) { throw new IOException("SHA-256 is unavailable", exception); }
+            ByteBuffer buffer = ByteBuffer.allocate(64 * 1024);
+            long position = 0;
+            while (position < channel.size()) {
+                buffer.clear();
+                buffer.limit((int) Math.min(buffer.capacity(), channel.size() - position));
+                int read = channel.read(buffer, position);
+                if (read < 1) throw new IOException("Snapshot payload ended while hashing");
+                digest.update(buffer.array(), 0, read);
+                position += read;
+            }
+            byte[] expected = java.util.HexFormat.of().parseHex(manifest.contentSha256());
+            if (!MessageDigest.isEqual(expected, digest.digest()))
+                throw new IOException("Snapshot payload SHA-256 does not match its manifest");
+            valid = true;
+            return channel;
+        } finally {
+            if (!valid) channel.close();
+        }
+    }
+
+    private static final class SnapshotRejectedException extends IOException {
+        private SnapshotRejectedException(String message) { super(message); }
     }
     public int connectedPeerCount() { return connections.size(); }
 
@@ -355,6 +536,7 @@ public final class PeerConnectionManager implements AutoCloseable {
 
         SnapshotTransferMessage.Message message = SnapshotTransferMessage.decode(frame);
         switch (message.type()) {
+            case ACCEPT, REJECT, CHUNK_ACK, COMPLETE -> handleSnapshotResponse(session, message);
             case OFFER -> {
                 try {
                     SnapshotTransferMessage.validateOfferAuthorization(
@@ -412,9 +594,26 @@ public final class PeerConnectionManager implements AutoCloseable {
                 logger.info("Snapshot staged and SHA-256 verified from " + session.peerId
                         + " (" + message.snapshotId() + "). It has not been installed.");
             }
-            case ACCEPT, REJECT, CHUNK_ACK, COMPLETE ->
-                    throw new IOException("Unexpected sender-side snapshot response on a receiving session");
         }
+    }
+
+    private static void handleSnapshotResponse(
+            PeerSession session, SnapshotTransferMessage.Message message) throws IOException {
+        ActiveSnapshotTransfer active = session.outboundSnapshotTransfer.get();
+        PendingSnapshotResponse pending = session.pendingSnapshotResponse.get();
+        if (active == null || pending == null
+                || !active.requestId.equals(message.requestId())
+                || !active.snapshotId.equals(message.snapshotId())
+                || !pending.requestId.equals(message.requestId())
+                || !pending.snapshotId.equals(message.snapshotId())
+                || (!pending.expectedTypes.contains(message.type())
+                    && message.type() != SnapshotTransferMessage.Type.REJECT)
+                || (message.type() == SnapshotTransferMessage.Type.CHUNK_ACK
+                    && message.chunkIndex() != pending.expectedChunkIndex)) {
+            throw new IOException("Unsolicited or mismatched snapshot response");
+        }
+        if (!pending.future.complete(message))
+            throw new IOException("Duplicate snapshot response");
     }
 
     private static ActiveSnapshotTransfer requireActiveSnapshot(
@@ -644,6 +843,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         if (!running.getAndSet(false)) {
             connectionWorkers.shutdownNow();
             deliveryWorkers.shutdownNow();
+            snapshotWorkers.shutdownNow();
             heartbeatWorker.shutdownNow();
             return;
         }
@@ -655,10 +855,12 @@ public final class PeerConnectionManager implements AutoCloseable {
         connections.clear();
         connectionWorkers.shutdownNow();
         deliveryWorkers.shutdownNow();
+        snapshotWorkers.shutdownNow();
         heartbeatWorker.shutdownNow();
         try {
             connectionWorkers.awaitTermination(5, TimeUnit.SECONDS);
             deliveryWorkers.awaitTermination(5, TimeUnit.SECONDS);
+            snapshotWorkers.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         }
@@ -680,6 +882,21 @@ public final class PeerConnectionManager implements AutoCloseable {
             this.requestId = requestId;
             this.snapshotId = snapshotId;
             this.manifest = manifest;
+        }
+    }
+
+    private static final class PendingSnapshotResponse {
+        private final UUID requestId;
+        private final UUID snapshotId;
+        private final Set<SnapshotTransferMessage.Type> expectedTypes;
+        private final long expectedChunkIndex;
+        private final CompletableFuture<SnapshotTransferMessage.Message> future = new CompletableFuture<>();
+        private PendingSnapshotResponse(UUID requestId, UUID snapshotId,
+                Set<SnapshotTransferMessage.Type> expectedTypes, long expectedChunkIndex) {
+            this.requestId = requestId;
+            this.snapshotId = snapshotId;
+            this.expectedTypes = expectedTypes;
+            this.expectedChunkIndex = expectedChunkIndex;
         }
     }
 
@@ -731,6 +948,8 @@ public final class PeerConnectionManager implements AutoCloseable {
         private final AtomicReference<PendingGapRequest> pendingGapRequest = new AtomicReference<>();
         private final AtomicReference<ServedGapResponse> servedGapResponse = new AtomicReference<>();
         private final AtomicReference<ActiveSnapshotTransfer> activeSnapshotTransfer = new AtomicReference<>();
+        private final AtomicReference<ActiveSnapshotTransfer> outboundSnapshotTransfer = new AtomicReference<>();
+        private final AtomicReference<PendingSnapshotResponse> pendingSnapshotResponse = new AtomicReference<>();
         private final AtomicLong lastInboundNanos = new AtomicLong(System.nanoTime());
         private final AtomicLong heartbeatPongsReceived = new AtomicLong();
         private PeerSession(String peerId, SSLSocket socket, int maxFrameBytes) {
@@ -751,6 +970,10 @@ public final class PeerConnectionManager implements AutoCloseable {
                 PendingDelivery current = pending.getAndSet(null);
                 if (current != null) current.future.completeExceptionally(new IOException("Peer disconnected"));
                 pendingHeartbeat.set(null);
+                PendingSnapshotResponse snapshotResponse = pendingSnapshotResponse.getAndSet(null);
+                if (snapshotResponse != null)
+                    snapshotResponse.future.completeExceptionally(new IOException("Peer disconnected"));
+                outboundSnapshotTransfer.set(null);
                 closeQuietly(socket);
             }
         }
