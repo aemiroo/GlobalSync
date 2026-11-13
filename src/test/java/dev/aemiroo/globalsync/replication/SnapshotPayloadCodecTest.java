@@ -99,6 +99,10 @@ class SnapshotPayloadCodecTest {
                 () -> new SnapshotPayloadCodec.BlockRecord(0, 0, 0, "minecraft:stone;run"));
         assertThrows(IllegalArgumentException.class,
                 () -> new SnapshotPayloadCodec.BlockRecord(0, 0, 0, "minecraft:stone[axis=y][x=z]"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SnapshotPayloadCodec.BlockRecord(0, 0, 0, ":stone"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SnapshotPayloadCodec.BlockRecord(0, 0, 0, "minecraft:mod:stone"));
     }
 
     @Test
