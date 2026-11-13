@@ -59,6 +59,11 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
             // deliberately excluded from snapshot coverage rather than guessed.
             ensureColumn("received_events", "world_sequence", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS received_world_origin_sequence
+                    ON received_events(world_id, origin_server_id, world_sequence)
+                    WHERE world_sequence > 0
+                    """);
+            statement.execute("""
                     CREATE TABLE IF NOT EXISTS block_winners (
                         world_id TEXT NOT NULL,
                         x INTEGER NOT NULL,
