@@ -60,27 +60,6 @@ public final class BlockApplicationService implements AutoCloseable {
         }
     }
 
-    /**
-     * Reconciles a local edit after its asynchronous journal commit. Paper applied
-     * it before the winner index was durable, so a racing remote task may need to
-     * be corrected if this local event is still the selected winner.
-     */
-    public void requestReconcile(ReplicationEnvelope event) {
-        if (!running.get()) return;
-        try {
-            worker.execute(() -> {
-                try {
-                    store.reconcileCurrentWinner(event.eventId(), () -> applyOnPaperThread(event));
-                } catch (SQLException | RuntimeException exception) {
-                    plugin.getLogger().log(Level.SEVERE,
-                            "Could not reconcile local block event " + event.eventId(), exception);
-                }
-            });
-        } catch (java.util.concurrent.RejectedExecutionException exception) {
-            plugin.getLogger().warning("Block reconciliation queue is full; local journal recovery will retry.");
-        }
-    }
-
     /** Called by the Paper scheduler; only enqueues background work. */
     private void scheduleDrain() {
         if (!running.get() || !drainQueued.compareAndSet(false, true)) return;
