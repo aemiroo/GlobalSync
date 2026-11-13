@@ -55,22 +55,39 @@ public final class ReplicationMessageHandler {
     }
 
     public byte[] handle(byte[] payload, String authenticatedPeerId) throws IOException {
+        ReplicationEnvelope event = decodeAndLimit(payload, authenticatedPeerId);
+        var receipt = accept(event);
+        return ReplicationMessageCodec.encodeAck(event.eventId(), receipt.offset());
+    }
+
+    /** Accepts a targeted replay only when it matches the outstanding exact sequence request. */
+    public java.util.UUID handleGapResponse(byte[] payload, String authenticatedPeerId,
+                                             long expectedSequence) throws IOException {
+        ReplicationEnvelope event = decodeAndLimit(payload, authenticatedPeerId);
+        if (event.sequence() != expectedSequence)
+            throw new IOException("Gap response does not match the requested origin sequence");
+        accept(event);
+        return event.eventId();
+    }
+
+    private ReplicationEnvelope decodeAndLimit(byte[] payload, String authenticatedPeerId) throws IOException {
         if (payload == null || authenticatedPeerId == null || authenticatedPeerId.isBlank())
             throw new IOException("Missing replication payload or authenticated peer identity");
         if (!rateLimiter.tryAcquire(authenticatedPeerId, payload.length))
             throw new IOException("Authenticated peer exceeded the inbound replication rate limit");
+        return ReplicationMessageCodec.decodeEvent(payload, authenticatedPeerId, sharedWorlds);
+    }
 
-        ReplicationEnvelope event = ReplicationMessageCodec.decodeEvent(payload, authenticatedPeerId, sharedWorlds);
+    private dev.aemiroo.globalsync.replication.ReceivedEventReceipt accept(ReplicationEnvelope event)
+            throws IOException {
         try {
             // Advance before accepting so a local edit racing with this receive
             // cannot be assigned a clock that precedes an already observed event.
             if (logicalClock != null) logicalClock.observe(event.logicalClock());
             var receipt = receivedEvents.accept(event);
             if (receipt.applyRequired()) applyRequest.accept(event);
-            // ACK is emitted only after the inbox and per-block winner commit.
-            return ReplicationMessageCodec.encodeAck(event.eventId(), receipt.offset());
+            return receipt;
         } catch (SQLException | JournalConflictException | IllegalStateException exception) {
             throw new IOException("Could not durably accept replication event", exception);
         }
-    }
-}
+    }}
