@@ -98,12 +98,29 @@ class SnapshotStagingStoreTest {
         SnapshotManifest corrupt = new SnapshotManifest(1, corruptId.toString(), "world", "asia",
                 Instant.parse("2026-11-13T10:00:00Z"), SnapshotManifest.BLOCK_DATA_FORMAT,
                 payload.length, wrongDigest.contentSha256(), 1, Map.of("asia", 1L));
-        try (SnapshotStagingStore store = store()) {
+        try (SnapshotStagingStore store = new SnapshotStagingStore(
+                temporaryDirectory.resolve("corrupt-staging"))) {
             store.begin("asia", REQUEST, corrupt);
             store.append("asia", REQUEST, corruptId, 0, payload);
             assertThrows(IOException.class, () -> store.finish("asia", REQUEST, corruptId));
             assertFalse(store.isComplete(corruptId));
         }
+    }
+
+    @Test
+    void revalidatesCompletedPayloadOnRestart() throws Exception {
+        byte[] payload = new byte[]{4, 5, 6};
+        SnapshotManifest manifest = manifest(payload);
+        try (SnapshotStagingStore store = store()) {
+            store.begin("asia", REQUEST, manifest);
+            store.append("asia", REQUEST, SNAPSHOT, 0, payload);
+            store.finish("asia", REQUEST, SNAPSHOT);
+        }
+        Path staged = temporaryDirectory.resolve("staging").resolve("data")
+                .resolve(SNAPSHOT + ".part");
+        java.nio.file.Files.write(staged, new byte[]{9},
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+        assertThrows(IOException.class, this::store);
     }
 
     @Test
