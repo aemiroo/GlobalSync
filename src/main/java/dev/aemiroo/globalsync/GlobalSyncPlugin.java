@@ -7,6 +7,8 @@ import dev.aemiroo.globalsync.network.PeerEndpoint;
 import dev.aemiroo.globalsync.network.ReplicationMessageHandler;
 import dev.aemiroo.globalsync.network.TlsContextFactory;
 import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
+import dev.aemiroo.globalsync.replication.BlockApplicationService;
+import dev.aemiroo.globalsync.replication.LogicalClock;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
@@ -39,6 +41,8 @@ import java.util.logging.Level;
 
 public final class GlobalSyncPlugin extends JavaPlugin {
     private SequenceClock sequenceClock;
+    private LogicalClock logicalClock;
+    private BlockApplicationService blockApplicationService;
     private EventDeduplicator eventDeduplicator;
     private SqliteEventJournal eventJournal;
     private SqliteReceivedEventStore receivedEventStore;
@@ -77,6 +81,12 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             Path receivedPath = journalPath.getParent().resolve("received.db");
             receivedEventStore = new SqliteReceivedEventStore(receivedPath);
             sequenceClock = new SequenceClock(eventJournal.lastSequence(serverId));
+            logicalClock = new LogicalClock(Math.max(
+                    eventJournal.lastLogicalClock(), receivedEventStore.lastLogicalClock()));
+            restoreLocalWinnerIndex();
+            if (getConfig().getBoolean("application.enabled", false)) {
+                blockApplicationService = new BlockApplicationService(this, receivedEventStore);
+            }
             journalOffset = new AtomicLong(eventJournal.lastOffset());
             journalExecutor = Executors.newSingleThreadExecutor(task -> {
                 Thread thread = new Thread(task, "GlobalSync-Journal-" + serverId);
@@ -92,6 +102,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
 
         try {
             startPeerNetworkingIfEnabled();
+            if (blockApplicationService != null) blockApplicationService.start();
         } catch (IOException | GeneralSecurityException | RuntimeException exception) {
             getLogger().log(Level.SEVERE,
                     "Peer networking configuration or startup failed. GlobalSync will fail closed.", exception);
@@ -120,6 +131,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (blockApplicationService != null) blockApplicationService.close();
         closePeerNetworking();
         if (journalExecutor != null) {
             journalExecutor.shutdown();
@@ -159,6 +171,10 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             return CompletableFuture.supplyAsync(() -> {
                 try {
                     long offset = eventJournal.append(envelope);
+                    if (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(envelope.eventType())
+                            || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(envelope.eventType())) {
+                        receivedEventStore.acceptLocal(envelope);
+                    }
                     journalOffset.accumulateAndGet(offset, Math::max);
                     return offset;
                 } catch (SQLException exception) {
@@ -193,6 +209,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 worldId,
                 serverId,
                 sequenceClock.next(),
+                logicalClock.tick(),
                 playerId,
                 x,
                 y,
@@ -226,7 +243,9 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         sender.sendMessage("§7Peer transport: §f" + (peerConnectionManager == null
                 ? "disabled" : peerConnectionManager.connectedPeerCount() + " authenticated peer(s)"));
         sender.sendMessage("§7Replication: §e" + (peerConnectionManager == null
-                ? "journal capture only" : "bidirectional durable event delivery enabled; world application unavailable"));
+                ? "journal capture only" : "bidirectional durable event delivery enabled"));
+        sender.sendMessage("§7World application: §f" + (blockApplicationService == null
+                ? "disabled" : "enabled"));
         return true;
     }
 
@@ -240,6 +259,18 @@ public final class GlobalSyncPlugin extends JavaPlugin {
 
     public boolean isSharedWorld(String worldId) {
         return sharedWorlds != null && sharedWorlds.contains(worldId);
+    }
+
+    private void restoreLocalWinnerIndex() throws SQLException {
+        long cursor = 0;
+        while (true) {
+            List<dev.aemiroo.globalsync.replication.JournalEntry> entries = eventJournal.readAfter(cursor, 500);
+            if (entries.isEmpty()) break;
+            for (var entry : entries) {
+                receivedEventStore.acceptLocal(entry.envelope());
+                cursor = entry.offset();
+            }
+        }
     }
 
     private void startPeerNetworkingIfEnabled() throws IOException, GeneralSecurityException {
@@ -312,7 +343,10 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 maxConnections,
                 handshakeTimeoutMillis,
                 getLogger(),
-                new ReplicationMessageHandler(receivedEventStore, Set.copyOf(sharedWorlds)),
+                new ReplicationMessageHandler(receivedEventStore, Set.copyOf(sharedWorlds),
+                        logicalClock, event -> {
+                            if (blockApplicationService != null) blockApplicationService.requestApply(event);
+                        }),
                 eventJournal,
                 acknowledgementTimeoutMillis,
                 deliveryPollMillis,
