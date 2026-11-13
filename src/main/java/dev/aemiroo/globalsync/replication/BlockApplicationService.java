@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 
 /**
@@ -23,12 +24,13 @@ import java.util.logging.Level;
  * SQLite reads/writes on a bounded background worker.
  */
 public final class BlockApplicationService implements AutoCloseable {
-    private static final int MAX_APPLICATIONS_PER_DRAIN = 32;
+    private static final int MAX_ATTEMPTS_PER_DRAIN = 32;
 
     private final JavaPlugin plugin;
     private final SqliteReceivedEventStore store;
     private final AtomicBoolean running = new AtomicBoolean();
     private final AtomicBoolean drainQueued = new AtomicBoolean();
+    private final AtomicInteger pendingCursor = new AtomicInteger();
     private final ThreadPoolExecutor worker;
     private BukkitTask retryTask;
 
@@ -65,10 +67,14 @@ public final class BlockApplicationService implements AutoCloseable {
             worker.execute(() -> {
                 try {
                     List<ReplicationEnvelope> pending = store.pendingWinners();
-                    int applied = 0;
-                    for (ReplicationEnvelope event : pending) {
-                        if (!running.get() || applied >= MAX_APPLICATIONS_PER_DRAIN) break;
-                        if (applyOne(event)) applied++;
+                    if (!pending.isEmpty()) {
+                        int start = Math.floorMod(pendingCursor.get(), pending.size());
+                        int attempts = Math.min(MAX_ATTEMPTS_PER_DRAIN, pending.size());
+                        for (int i = 0; i < attempts && running.get(); i++) {
+                            ReplicationEnvelope event = pending.get((start + i) % pending.size());
+                            applyOne(event);
+                        }
+                        pendingCursor.set((start + attempts) % pending.size());
                     }
                 } catch (SQLException exception) {
                     plugin.getLogger().log(Level.SEVERE, "Could not read pending block applications", exception);
