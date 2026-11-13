@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
 /**
  * Durable inbound event inbox and deterministic per-block winner index.
@@ -223,7 +224,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
      * winner cannot be committed between the winner check and the world write.
      * If the callback fails, the event remains pending for retry after restart.
      */
-    public synchronized boolean applyCurrentWinner(UUID eventId, Runnable worldMutation) throws SQLException {
+    public synchronized boolean applyCurrentWinner(UUID eventId, BooleanSupplier worldMutation) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT 1 FROM received_events e
                 JOIN block_winners w ON w.event_id = e.event_id
@@ -234,7 +235,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                 if (!result.next()) return false;
             }
         }
-        worldMutation.run();
+        if (!worldMutation.getAsBoolean()) return false;
         try (PreparedStatement update = connection.prepareStatement(
                 "UPDATE received_events SET status = 'APPLIED' WHERE event_id = ? AND status = 'PENDING'")) {
             update.setString(1, eventId.toString());
