@@ -64,6 +64,7 @@ public final class SnapshotPayloadCodec {
         data.writeInt((int) expectedRecords);
 
         long written = 0;
+        long totalLength = HEADER_BYTES;
         BlockRecord previous = null;
         for (BlockRecord record : records) {
             if (record == null) throw new IOException("Snapshot contains a null block record");
@@ -80,13 +81,14 @@ public final class SnapshotPayloadCodec {
             data.writeInt(record.z());
             data.writeShort(blockData.length);
             data.write(blockData);
+            totalLength = Math.addExact(totalLength, 14L + blockData.length);
             previous = record;
             written++;
         }
         if (written != expectedRecords)
             throw new IOException("Snapshot contains fewer records than declared");
         data.flush();
-        return HEADER_BYTES + payloadLength(records, expectedRecords);
+        return totalLength;
     }
 
     /**
@@ -150,25 +152,7 @@ public final class SnapshotPayloadCodec {
     }
 
     private static boolean isValidBlockData(String value) {
-        if (value.isBlank()) return false;
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if (Character.isISOControl(c)) return false;
-        }
-        int bracket = value.indexOf('[');
-        String material = bracket < 0 ? value : value.substring(0, bracket);
-        int colon = material.indexOf(':');
-        if (colon < 1 || colon == material.length() - 1 || material.indexOf(':', colon + 1) >= 0)
-            return false;
-        for (int i = 0; i < material.length(); i++) {
-            char c = material.charAt(i);
-            if (i == colon) continue;
-            if (!(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9')
-                    && c != '_' && c != '-' && c != '.' && c != '/') return false;
-        }
-        if (bracket >= 0 && (!value.endsWith("]") || bracket == value.length() - 2
-                || value.indexOf('[', bracket + 1) >= 0)) return false;
-        return true;
+        return value.matches("[a-z0-9_.:/-]+(?:\\\\[[a-z0-9_.:/,=-]+\\\\])?");
     }
 
     private static String decodeStrict(byte[] bytes) throws IOException {
@@ -186,19 +170,4 @@ public final class SnapshotPayloadCodec {
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
-    /*
-     * Count-only length helper is intentionally not used to pre-buffer the
-     * records. write() computes the exact emitted length while streaming.
-     */
-    private static long payloadLength(Iterable<BlockRecord> records, long count) throws IOException {
-        long length = 4L * count + 4L * count;
-        long seen = 0;
-        for (BlockRecord record : records) {
-            if (record == null) throw new IOException("Snapshot contains a null block record");
-            length = Math.addExact(length, 2L + record.blockData().getBytes(StandardCharsets.UTF_8).length);
-            seen++;
-        }
-        if (seen != count) throw new IOException("Snapshot record count changed while writing");
-        return length;
-    }
 }
