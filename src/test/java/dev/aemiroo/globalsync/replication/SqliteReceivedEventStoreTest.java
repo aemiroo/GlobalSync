@@ -96,7 +96,7 @@ class SqliteReceivedEventStoreTest {
             assertTrue(store.reconcileCurrentWinner(local.eventId(), () -> true));
             ReplicationEnvelope newer = event("region-local", 2, 28, "minecraft:dirt");
             store.acceptLocal(newer);
-            assertFalse(store.reconcileCurrentWinner(local.eventId(), () -> fail("stale event must not mutate")));
+            assertFalse(store.reconcileCurrentWinner(local.eventId(), () -> { fail("stale event must not mutate"); return true; }));
             assertTrue(store.reconcileCurrentWinner(newer.eventId(), () -> true));
         }
         try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
