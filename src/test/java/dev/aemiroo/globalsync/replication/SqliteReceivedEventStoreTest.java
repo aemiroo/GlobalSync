@@ -210,7 +210,7 @@ class SqliteReceivedEventStoreTest {
         Path database = directory.resolve("gap-recovery.db");
         Instant detected = Instant.parse("2026-11-13T01:00:00Z");
         Instant unavailable = detected.plusSeconds(30);
-        ReplicationEnvelope missing = event("region-alpha", 3, 3, "minecraft:granite");
+        ReplicationEnvelope missing = event("region-alpha", 2, 2, "minecraft:granite");
 
         try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(database)) {
             store.accept(event("region-alpha", 1, 1, "minecraft:stone"));
@@ -232,7 +232,7 @@ class SqliteReceivedEventStoreTest {
             assertTrue(record.unavailable());
             recovered.accept(missing);
             assertTrue(recovered.gapRecoveryProgress().isEmpty());
-            assertFalse(recovered.originSequenceProgress().getFirst().hasGap());
+            assertEquals(3, recovered.originSequenceProgress().getFirst().firstMissingSequence());
         }
     }
 
