@@ -339,6 +339,9 @@ public final class PeerConnectionManager implements AutoCloseable {
 
     private void handleGapMessage(PeerSession session, byte[] frame) throws IOException {
         GapRepairMessage.Message message = GapRepairMessage.decode(frame);
+        if (message.type() != GapRepairMessage.Type.EVENT
+                && !controlRateLimiter.tryAcquire(session.peerId, frame.length))
+            throw new IOException("Peer exceeded the gap-control rate limit");
         if (message.type() == GapRepairMessage.Type.EVENT) {
             PendingGapRequest pending = session.pendingGapRequest.get();
             if (pending == null || !pending.requestId.equals(message.requestId()))
