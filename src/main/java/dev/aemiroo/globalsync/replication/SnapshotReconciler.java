@@ -88,7 +88,7 @@ public final class SnapshotReconciler {
                 throw new IllegalArgumentException("Applied event has no trustworthy world-local sequence");
             long boundary = appliedThrough.getOrDefault(event.originServerId(), 0L);
             if (event.worldSequence() <= boundary) continue;
-            String identity = event.originServerId() + "\u0000" + event.worldSequence();
+            String identity = event.originServerId() + ":" + event.worldSequence();
             if (!eventSequences.add(identity))
                 throw new IllegalArgumentException("Applied event history contains a duplicate world sequence");
             ordered.add(event);
