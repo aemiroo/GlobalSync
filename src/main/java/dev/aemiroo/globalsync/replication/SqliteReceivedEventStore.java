@@ -216,6 +216,31 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         }
     }
 
+
+    /**
+     * Runs the Paper-thread mutation while holding the inbox lock, so a newer
+     * winner cannot be committed between the winner check and the world write.
+     * If the callback fails, the event remains pending for retry after restart.
+     */
+    public synchronized boolean applyCurrentWinner(UUID eventId, Runnable worldMutation) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM received_events e
+                JOIN block_winners w ON w.event_id = e.event_id
+                WHERE e.event_id = ? AND e.status = 'PENDING'
+                """)) {
+            query.setString(1, eventId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) return false;
+            }
+        }
+        worldMutation.run();
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE received_events SET status = 'APPLIED' WHERE event_id = ? AND status = 'PENDING'")) {
+            update.setString(1, eventId.toString());
+            return update.executeUpdate() == 1;
+        }
+    }
+
     /** Marks an event applied only if it is still the durable winner for its block. */
     public synchronized boolean markApplied(UUID eventId) throws SQLException {
         try (PreparedStatement update = connection.prepareStatement("""
