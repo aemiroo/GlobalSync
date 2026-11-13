@@ -80,7 +80,7 @@ public final class ReplicationMessageCodec {
             throw new IOException("BLOCK_PLACE cannot result in minecraft:air");
         try {
             return new ReplicationEnvelope(2, UUID.fromString(string(json, "eventId")), world, origin,
-                    longInteger(json, "sequence"), longInteger(json, "logicalClock"),
+                    longInteger(json, "sequence"), checkedRemoteLogicalClock(json),
                     Instant.parse(string(json, "createdAt")), eventType,
                     Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
                             "z", Integer.toString(z), "previous_block_data", previous, "new_block_data", next));
@@ -133,6 +133,14 @@ public final class ReplicationMessageCodec {
         } catch (RuntimeException exception) {
             throw new IOException("Invalid legacy replication envelope", exception);
         }
+    }
+
+
+    private static long checkedRemoteLogicalClock(JsonObject json) throws IOException {
+        long clock = longInteger(json, "logicalClock");
+        if (clock < 1 || clock > dev.aemiroo.globalsync.replication.LogicalClock.MAX_REMOTE_VALUE)
+            throw new IOException("Remote logical clock is outside the accepted range");
+        return clock;
     }
 
     public static byte[] encodeAck(UUID eventId, long journalOffset) {
