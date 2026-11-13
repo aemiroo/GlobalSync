@@ -18,8 +18,9 @@ class LogicalClockTest {
     void rejectsInvalidAndExhaustedClockValues() {
         assertThrows(IllegalArgumentException.class, () -> new LogicalClock(-1));
         assertThrows(IllegalArgumentException.class, () -> new LogicalClock().observe(0));
-        LogicalClock exhausted = new LogicalClock(Long.MAX_VALUE);
+        LogicalClock exhausted = new LogicalClock(LogicalClock.MAX_VALUE);
         assertThrows(IllegalStateException.class, exhausted::tick);
         assertThrows(IllegalStateException.class, () -> exhausted.observe(1));
+        assertThrows(IllegalArgumentException.class, () -> new LogicalClock(LogicalClock.MAX_VALUE + 1));
     }
 }
