@@ -51,6 +51,7 @@ public final class SqliteEventJournal implements AutoCloseable {
                         world_id TEXT NOT NULL,
                         origin_server_id TEXT NOT NULL,
                         origin_sequence INTEGER NOT NULL CHECK (origin_sequence > 0),
+                        world_sequence INTEGER NOT NULL DEFAULT 0 CHECK (world_sequence >= 0),
                         logical_clock INTEGER NOT NULL CHECK (logical_clock > 0),
                         protocol_version INTEGER NOT NULL,
                         created_at TEXT NOT NULL,
@@ -64,6 +65,12 @@ public final class SqliteEventJournal implements AutoCloseable {
                     ON events(world_id, journal_offset)
                     """);
             ensureColumn("events", "logical_clock", "INTEGER NOT NULL DEFAULT 1");
+            ensureColumn("events", "world_sequence", "INTEGER NOT NULL DEFAULT 0");
+            statement.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_events_origin_world_sequence
+                    ON events(origin_server_id, world_id, world_sequence)
+                    WHERE world_sequence > 0
+                    """);
             // Upgrade previously journaled v1 events to the v2 envelope. Their
             // per-node sequence is the only safe legacy logical-order seed.
             statement.execute("UPDATE events SET logical_clock = MIN(origin_sequence, 1000000000), protocol_version = 2 WHERE protocol_version = 1");
@@ -89,9 +96,9 @@ public final class SqliteEventJournal implements AutoCloseable {
     public synchronized long append(ReplicationEnvelope envelope) throws SQLException {
         String sql = """
                 INSERT INTO events (
-                    event_id, world_id, origin_server_id, origin_sequence, logical_clock,
+                    event_id, world_id, origin_server_id, origin_sequence, world_sequence, logical_clock,
                     protocol_version, created_at, event_type, attributes_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
 
         try (PreparedStatement insert = connection.prepareStatement(sql)) {
@@ -99,11 +106,12 @@ public final class SqliteEventJournal implements AutoCloseable {
             insert.setString(2, envelope.worldId());
             insert.setString(3, envelope.originServerId());
             insert.setLong(4, envelope.sequence());
-            insert.setLong(5, envelope.logicalClock());
-            insert.setInt(6, envelope.protocolVersion());
-            insert.setString(7, envelope.createdAt().toString());
-            insert.setString(8, envelope.eventType());
-            insert.setString(9, gson.toJson(envelope.attributes()));
+            insert.setLong(5, envelope.worldSequence());
+            insert.setLong(6, envelope.logicalClock());
+            insert.setInt(7, envelope.protocolVersion());
+            insert.setString(8, envelope.createdAt().toString());
+            insert.setString(9, envelope.eventType());
+            insert.setString(10, gson.toJson(envelope.attributes()));
             insert.executeUpdate();
             return lastInsertedOffset();
         } catch (SQLException insertFailure) {
@@ -128,7 +136,7 @@ public final class SqliteEventJournal implements AutoCloseable {
         }
 
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence,
+                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence, world_sequence,
                        logical_clock, protocol_version, created_at, event_type, attributes_json
                 FROM events
                 WHERE journal_offset > ?
@@ -294,7 +302,7 @@ public final class SqliteEventJournal implements AutoCloseable {
         }
 
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence,
+                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence, world_sequence,
                        logical_clock, protocol_version, created_at, event_type, attributes_json
                 FROM events
                 WHERE origin_server_id = ? AND origin_sequence = ?
@@ -317,6 +325,22 @@ public final class SqliteEventJournal implements AutoCloseable {
         }
     }
 
+
+    /** Highest world-local sequence persisted for this origin and world. */
+    public synchronized long lastWorldSequence(String originServerId, String worldId) throws SQLException {
+        if (originServerId == null || !originServerId.matches("[A-Za-z0-9._-]{1,64}"))
+            throw new IllegalArgumentException("Invalid origin server ID");
+        if (worldId == null || worldId.isBlank())
+            throw new IllegalArgumentException("Invalid world ID");
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT COALESCE(MAX(world_sequence), 0) FROM events WHERE origin_server_id = ? AND world_id = ?")) {
+            query.setString(1, originServerId);
+            query.setString(2, worldId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0L;
+            }
+        }
+    }
 
     /** Highest Lamport clock persisted in this node's outgoing journal. */
     public synchronized long lastLogicalClock() throws SQLException {
@@ -363,7 +387,7 @@ public final class SqliteEventJournal implements AutoCloseable {
 
     private JournalEntry findConflict(ReplicationEnvelope envelope) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
-                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence,
+                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence, world_sequence,
                        logical_clock, protocol_version, created_at, event_type, attributes_json
                 FROM events
                 WHERE event_id = ? OR (origin_server_id = ? AND origin_sequence = ?)
@@ -386,6 +410,7 @@ public final class SqliteEventJournal implements AutoCloseable {
                 result.getString("world_id"),
                 result.getString("origin_server_id"),
                 result.getLong("origin_sequence"),
+                result.getLong("world_sequence"),
                 result.getLong("logical_clock"),
                 Instant.parse(result.getString("created_at")),
                 result.getString("event_type"),
