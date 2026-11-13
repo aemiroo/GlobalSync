@@ -34,6 +34,7 @@ Implemented so far:
 - Opt-in Paper-main-thread application of winning remote block edits, with no forced chunk loads and no physics side effects.
 - Authenticated origin and shared-world validation, with exact message and payload field sets.
 - Separate SQLite inbound inbox (`journal/received.db`) with durable deduplication by event ID and origin sequence.
+- Authenticated snapshot-transfer receiver with strict manifest/chunk validation and isolated, durable staging; staged snapshots are not installed into live worlds.
 - Receiver ACKs only after the inbound inbox transaction commits.
 - Bidirectional stop-and-wait delivery from each node's local journal, with one outstanding event per peer.
 - Per-peer local journal acknowledgement cursors persisted in SQLite and resumed after restart.
@@ -42,10 +43,11 @@ Implemented so far:
 - Separate bounded rate limiting for heartbeat control frames.
 - A status command and Maven/GitHub Actions verification workflow.
 
-Authenticated peers exchange allowlisted block-edit events in both directions. Each sender advances its durable per-peer cursor only after receiving an ACK for the exact event; the receiver sends that ACK only after committing the event and its per-block winner decision. A disconnect or lost ACK causes replay from the last persisted cursor. When `application.enabled` is enabled, winning remote edits are applied on Paper's main thread. Events for unloaded chunks remain pending and are retried when the chunk is loaded.
+Authenticated peers exchange allowlisted block-edit events in both directions and can exchange bounded gap-repair and snapshot-staging messages. Snapshot payloads remain isolated in staging and are never installed into a live world. Each sender advances its durable per-peer cursor only after receiving an ACK for the exact event; the receiver sends that ACK only after committing the event and its per-block winner decision. A disconnect or lost ACK causes replay from the last persisted cursor. When `application.enabled` is enabled, winning remote edits are applied on Paper's main thread. Events for unloaded chunks remain pending and are retried when the chunk is loaded.
 
 Not implemented yet:
 
+- Paper world snapshot capture, outbound snapshot production, live-world snapshot installation, and post-install event reconciliation. The receiver can only stage and verify opaque snapshot payloads.
 - Capture of environmental changes, block entities, containers, and other non-player mutations.
 - Global consensus, partition fencing, and snapshot-based replica repair.
 - Expanded peer health metrics and configurable rate limits.
@@ -84,7 +86,7 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 
 ### Controlled peer-replication testing
 
-The network and world-application layers are independently opt-in. The network sends and receives allowlisted block-edit events with durable acknowledgements. With `application.enabled: true`, winning edits are applied on the Paper main thread; unloaded chunks are not force-loaded.
+The network and world-application layers are independently opt-in. The network exchanges allowlisted block-edit events, targeted gap-repair messages, and bounded snapshot-staging messages. A completed snapshot transfer means only that the opaque payload was durably staged and SHA-256 verified; it does not mean the world was changed. With `application.enabled: true`, winning edits are applied on the Paper main thread; unloaded chunks are not force-loaded.
 
 Before enabling it:
 
