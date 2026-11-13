@@ -12,13 +12,13 @@ public final class BlockChangeEnvelopeFactory {
     private BlockChangeEnvelopeFactory() { }
 
     public static ReplicationEnvelope create(String eventType, String worldId,
-            String originServerId, long sequence, long logicalClock, UUID playerId,
+            String originServerId, long sequence, long worldSequence, long logicalClock, UUID playerId,
             int x, int y, int z, String previousBlockData, String newBlockData) {
         if (!BLOCK_PLACE.equals(eventType) && !BLOCK_BREAK.equals(eventType))
             throw new IllegalArgumentException("Unsupported player block event type: " + eventType);
         return new ReplicationEnvelope(
                 ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), worldId,
-                originServerId, sequence, logicalClock, Instant.now(), eventType,
+                originServerId, sequence, worldSequence, logicalClock, Instant.now(), eventType,
                 Map.of("player_uuid", playerId.toString(),
                         "x", Integer.toString(x), "y", Integer.toString(y),
                         "z", Integer.toString(z),
@@ -30,7 +30,7 @@ public final class BlockChangeEnvelopeFactory {
     public static ReplicationEnvelope create(String eventType, String worldId,
             String originServerId, long sequence, UUID playerId,
             int x, int y, int z, String previousBlockData, String newBlockData) {
-        return create(eventType, worldId, originServerId, sequence, sequence, playerId,
+        return create(eventType, worldId, originServerId, sequence, sequence, sequence, playerId,
                 x, y, z, previousBlockData, newBlockData);
     }
 }
