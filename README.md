@@ -107,3 +107,6 @@ The local outgoing event database is stored at `plugins/GlobalSync/journal/event
 Use `/globalsync status` to inspect the current node, capture state, journal offset, authenticated peer count, and each configured peer's delivery state. Peer progress shows the local acknowledgement cursor, local journal head, pending event count, oldest pending event age, and valid heartbeat PONG count. It also reports receive-side sequence coverage per origin and identifies the first missing sequence when a later sequence has already arrived. These SQLite reads run asynchronously and results are returned on the server thread. Sequence gaps are diagnostic only; they do not yet trigger replay or snapshot repair.
 
 See [the architecture notes](docs/ARCHITECTURE.md), [the protocol notes](docs/PROTOCOL.md), and [the security policy](SECURITY.md) for implementation boundaries and operational requirements.
+
+
+World-local snapshot coverage is tracked separately from the global per-origin delivery sequence. Only events durably marked `APPLIED` contribute to a contiguous per-world/per-origin watermark; legacy rows without a trustworthy world-local sequence are excluded.

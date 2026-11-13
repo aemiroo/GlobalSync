@@ -282,6 +282,82 @@ class SqliteReceivedEventStoreTest {
         }
     }
 
+    @Test
+    void worldAppliedCoverageIsIndependentAndWaitsForContiguousAppliedEvents() throws Exception {
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("world-coverage.db"))) {
+            ReplicationEnvelope second = worldEvent("region-alpha", 12, 2, "world-a", 2, 12);
+            ReplicationEnvelope first = worldEvent("region-alpha", 11, 1, "world-a", 1, 11);
+            ReplicationEnvelope otherWorld = worldEvent("region-alpha", 13, 1, "world-b", 3, 13);
+
+            store.accept(second);
+            assertTrue(store.applyCurrentWinner(second.eventId(), () -> true));
+            var gap = store.worldAppliedSequenceProgress().getFirst();
+            assertEquals("world-a", gap.worldId());
+            assertEquals(0, gap.contiguousAppliedThrough());
+            assertEquals(2, gap.highestAppliedSequence());
+            assertTrue(gap.hasGap());
+
+            store.accept(first);
+            assertTrue(store.applyCurrentWinner(first.eventId(), () -> true));
+            store.accept(otherWorld);
+            assertTrue(store.applyCurrentWinner(otherWorld.eventId(), () -> true));
+
+            var progress = store.worldAppliedSequenceProgress();
+            assertEquals(2, progress.size());
+            var worldA = progress.get(0);
+            assertEquals("world-a", worldA.worldId());
+            assertEquals(2, worldA.contiguousAppliedThrough());
+            assertFalse(worldA.hasGap());
+            var worldB = progress.get(1);
+            assertEquals("world-b", worldB.worldId());
+            assertEquals(1, worldB.contiguousAppliedThrough());
+        }
+    }
+
+    @Test
+    void receivedAndSupersededEventsDoNotAdvanceAppliedCoverage() throws Exception {
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("not-applied.db"))) {
+            ReplicationEnvelope pending = worldEvent("region-alpha", 1, 1, "world-a", 1, 1);
+            store.accept(pending);
+            assertTrue(store.worldAppliedSequenceProgress().isEmpty());
+
+            ReplicationEnvelope legacy = new ReplicationEnvelope(
+                    ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), "world-a",
+                    "region-legacy", 1, 0, 2, Instant.parse("2026-11-13T00:00:00Z"),
+                    "BLOCK_PLACE", attributes("minecraft:stone"));
+            store.accept(legacy);
+            assertTrue(store.worldAppliedSequenceProgress().isEmpty());
+        }
+    }
+
+    @Test
+    void worldAppliedCoverageSurvivesRestartAndRejectsDuplicateWorldSequence() throws Exception {
+        Path database = directory.resolve("world-coverage-restart.db");
+        ReplicationEnvelope applied = worldEvent("region-alpha", 5, 1, "world-a", 5, 5);
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(database)) {
+            store.accept(applied);
+            assertTrue(store.applyCurrentWinner(applied.eventId(), () -> true));
+        }
+        try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
+            var progress = recovered.worldAppliedSequenceProgress().getFirst();
+            assertEquals(1, progress.contiguousAppliedThrough());
+            assertEquals(1, progress.appliedEvents());
+            ReplicationEnvelope duplicateSequence = worldEvent("region-alpha", 6, 1, "world-a", 6, 6);
+            assertThrows(java.sql.SQLException.class, () -> recovered.accept(duplicateSequence));
+        }
+    }
+
+    private static ReplicationEnvelope worldEvent(
+            String origin, long globalSequence, long worldSequence, String world, int x, long clock) {
+        Map<String, String> blockAttributes = Map.of(
+                "player_uuid", "d6a9b5df-1b1d-4b17-9f45-9f9b9f1b7d11",
+                "x", Integer.toString(x), "y", "64", "z", "-4",
+                "previous_block_data", "minecraft:air", "new_block_data", "minecraft:stone");
+        return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION,
+                UUID.randomUUID(), world, origin, globalSequence, worldSequence, clock,
+                Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE", blockAttributes);
+    }
+
     private static ReplicationEnvelope event(String origin, long sequence, long clock, String blockData) {
         return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(),
                 "world", origin, sequence, clock, Instant.parse("2026-11-13T00:00:00Z"),
