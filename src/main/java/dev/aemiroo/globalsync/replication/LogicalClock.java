@@ -11,6 +11,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * restore the maximum persisted value on startup.</p>
  */
 public final class LogicalClock {
+    /** Far beyond any practical event rate, while preventing remote clock poisoning. */
+    public static final long MAX_VALUE = 1_000_000_000_000L;
     private final AtomicLong value;
 
     public LogicalClock() {
@@ -18,7 +20,7 @@ public final class LogicalClock {
     }
 
     public LogicalClock(long initialValue) {
-        if (initialValue < 0) {
+        if (initialValue < 0 || initialValue > MAX_VALUE) {
             throw new IllegalArgumentException("initialValue must not be negative");
         }
         value = new AtomicLong(initialValue);
@@ -26,7 +28,7 @@ public final class LogicalClock {
 
     public long tick() {
         return value.updateAndGet(current -> {
-            if (current == Long.MAX_VALUE) {
+            if (current >= MAX_VALUE) {
                 throw new IllegalStateException("Logical clock exhausted");
             }
             return current + 1;
@@ -37,7 +39,7 @@ public final class LogicalClock {
      * Records receipt of a remote event and advances beyond both known clocks.
      */
     public long observe(long remoteValue) {
-        if (remoteValue < 1) {
+        if (remoteValue < 1 || remoteValue > MAX_VALUE) {
             throw new IllegalArgumentException("remoteValue must be positive");
         }
         return value.updateAndGet(current -> {
