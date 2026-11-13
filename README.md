@@ -110,3 +110,6 @@ See [the architecture notes](docs/ARCHITECTURE.md), [the protocol notes](docs/PR
 
 
 World-local snapshot coverage is tracked separately from the global per-origin delivery sequence. Only events durably marked `APPLIED` contribute to a contiguous per-world/per-origin watermark; legacy rows without a trustworthy world-local sequence are excluded.
+
+
+The snapshot work currently includes a bounded, loaded-chunk capture primitive only. It samples immutable chunk snapshots over multiple ticks and deliberately does not publish or install them: a consistency/reconciliation protocol is still required before any capture can be treated as a valid world snapshot.
