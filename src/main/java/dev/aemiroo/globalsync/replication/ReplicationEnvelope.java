@@ -23,7 +23,8 @@ public record ReplicationEnvelope(
         requireText(originServerId, "originServerId");
         requireText(eventType, "eventType");
         if (sequence < 1) throw new IllegalArgumentException("sequence must be positive");
-        if (logicalClock < 1) throw new IllegalArgumentException("logicalClock must be positive");
+        if (logicalClock < 1 || logicalClock > LogicalClock.MAX_VALUE)
+            throw new IllegalArgumentException("logicalClock is outside the supported range");
         attributes = Map.copyOf(attributes);
     }
 
