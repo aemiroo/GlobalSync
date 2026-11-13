@@ -49,7 +49,7 @@ class ReplicationMessageHandlerTest {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
             assertThrows(java.io.IOException.class, () -> handler.handle(
                     ReplicationMessageCodec.encodeEvent(event()), "different-peer"));
-            ReplicationEnvelope otherWorld = new ReplicationEnvelope(1, UUID.randomUUID(), "other",
+            ReplicationEnvelope otherWorld = new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), "other",
                     "region-eu", 2, Instant.now(), "BLOCK_PLACE", event().attributes());
             assertThrows(java.io.IOException.class, () -> handler.handle(
                     ReplicationMessageCodec.encodeEvent(otherWorld), "region-eu"));
@@ -68,7 +68,7 @@ class ReplicationMessageHandlerTest {
             String duplicateKey = valid.replaceFirst("\"type\":\"EVENT\"", "\"type\":\"EVENT\",\"type\":\"EVENT\"");
             assertThrows(java.io.IOException.class, () -> handler.handle(
                     duplicateKey.getBytes(StandardCharsets.UTF_8), "region-eu"));
-            ReplicationEnvelope unsupported = new ReplicationEnvelope(1, UUID.randomUUID(), "world",
+            ReplicationEnvelope unsupported = new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), "world",
                     "region-eu", 3, Instant.now(), "ENTITY_TELEPORT", Map.of());
             assertThrows(java.io.IOException.class, () -> handler.handle(
                     ReplicationMessageCodec.encodeEvent(unsupported), "region-eu"));
@@ -82,7 +82,7 @@ class ReplicationMessageHandlerTest {
             ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
             ReplicationEnvelope original = event();
             handler.handle(ReplicationMessageCodec.encodeEvent(original), "region-eu");
-            ReplicationEnvelope conflict = new ReplicationEnvelope(1, original.eventId(), "world",
+            ReplicationEnvelope conflict = new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, original.eventId(), "world",
                     "region-eu", original.sequence(), Instant.now(), "BLOCK_PLACE",
                     Map.of("player_uuid", original.attributes().get("player_uuid"),
                             "x", "99", "y", "64", "z", "8",
@@ -95,7 +95,7 @@ class ReplicationMessageHandlerTest {
     }
 
     private static ReplicationEnvelope event() {
-        return new ReplicationEnvelope(1, UUID.fromString("9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1"),
+        return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.fromString("9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1"),
                 "world", "region-eu", 1, Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE",
                 Map.of("player_uuid", "d6a9b5df-1b1d-4b17-9f45-9f9b9f1b7d11",
                         "x", "12", "y", "64", "z", "-4",
