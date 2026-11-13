@@ -47,3 +47,22 @@ Before a future receiver installs a snapshot, it must validate the manifest, exa
 After installation, the receiver must replay events strictly beyond the snapshot's per-origin applied-through vector, using durable inbox deduplication and the existing deterministic winner order. Events that arrive during transfer must remain durable and be reconciled against the snapshot boundary. Snapshot installation and event replay must be crash-recoverable and idempotent.
 
 This milestone does not implement any of those transfer or installation operations. They are separate follow-up work and must not be inferred from the presence of a manifest codec.
+
+
+## Authenticated transfer message contract
+
+The protocol-v2 snapshot-transfer wire codec defines the following bounded messages:
+
+- `SNAPSHOT_OFFER`: a canonical version-1 manifest.
+- `SNAPSHOT_ACCEPT` / `SNAPSHOT_REJECT`: explicit receiver decision, with a fixed rejection-reason allowlist.
+- `SNAPSHOT_CHUNK`: one indexed payload segment, at most 256 KiB before Base64 framing.
+- `SNAPSHOT_CHUNK_ACK`: acknowledgement of one exact chunk index.
+- `SNAPSHOT_FINISH` / `SNAPSHOT_COMPLETE`: end-of-stream and receiver completion markers.
+
+Every message includes protocol version 2 and a canonical request UUID; transfer-specific messages also bind to the manifest snapshot UUID. Chunk indices are bounded by the maximum manifest payload length. A receiver must additionally check each chunk against the active manifest: exact snapshot ID, index below the computed chunk count, and exact expected byte length (including the final chunk). The codec exposes this check as `validateChunkForManifest`.
+
+An offer must be bound to the authenticated TLS peer identity: `manifest.sourceServerId` must exactly equal the peer ID established by the pinned-certificate HELLO/READY handshake. Its world ID must be in the receiver's configured shared-world allowlist. A valid certificate alone does not authorize arbitrary worlds or a claimed third-party snapshot origin.
+
+The codec is a wire-format and validation foundation only. This milestone does not yet attach a transfer handler to peer sessions, write chunks to disk, resume interrupted transfers, or expose any remote filesystem operation. Until a later receiver-staging milestone wires the handler, these messages are not an enabled operational transfer feature. No message contains a filesystem path, command, class name, plugin identifier, or configuration mutation.
+
+All JSON messages are canonical and reject unknown/missing fields, duplicate keys through canonical-form rejection, malformed UTF-8, invalid UUIDs, invalid enum values, invalid Base64, oversized frames, and out-of-range chunk indices. Chunk data is copied defensively by the decoded message model.
