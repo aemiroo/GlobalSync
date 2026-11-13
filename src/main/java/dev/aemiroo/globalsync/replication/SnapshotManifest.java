@@ -29,6 +29,7 @@ public record SnapshotManifest(
 ) {
     public static final int CURRENT_FORMAT_VERSION = 1;
     public static final String BLOCK_DATA_FORMAT = "PAPER_BLOCK_DATA_V1";
+    public static final String BLOCK_DATA_FORMAT_V2 = "PAPER_BLOCK_DATA_V2";
     public static final int MAX_ORIGINS = 64;
     public static final long MAX_CONTENT_LENGTH_BYTES = 64L * 1024 * 1024 * 1024;
     private static final Pattern SERVER_ID = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -54,7 +55,7 @@ public record SnapshotManifest(
             throw new IllegalArgumentException("Invalid snapshot source server ID");
         }
         Objects.requireNonNull(createdAt, "createdAt");
-        if (!BLOCK_DATA_FORMAT.equals(dataFormat)) {
+        if (!BLOCK_DATA_FORMAT.equals(dataFormat) && !BLOCK_DATA_FORMAT_V2.equals(dataFormat)) {
             throw new IllegalArgumentException("Unsupported snapshot data format");
         }
         if (contentLengthBytes < 1 || contentLengthBytes > MAX_CONTENT_LENGTH_BYTES) {
