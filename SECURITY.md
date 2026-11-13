@@ -11,7 +11,7 @@ No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to ma
 - The Minecraft server process and its administrators are trusted. A server operator, host administrator, JVM agent, or another plugin with equivalent process access can alter GlobalSync behavior or read its secrets.
 - The local journal is trusted only to the extent that the server account and filesystem are protected. SQLite durability is not tamper-proof storage.
 - Peer certificates authenticate possession of a private key. The configured trust store and per-peer SHA-256 fingerprint allowlist must both authorize a peer.
-- A valid peer is not globally authoritative. Future protocol handlers must validate message type, schema, world allowlist, origin identity, sequence, size, and authorization independently.
+- A valid peer is trusted to submit the currently permitted replicated state for its own authenticated node identity and to transfer opaque snapshot bytes into the receiver's staging area. It is not globally authoritative and must never gain command, code-loading, configuration, or live-world installation privileges. Every protocol handler must validate message type, schema, world allowlist, origin identity, sequence/request binding, size, and authorization independently.
 - A compromised regional node must not be allowed to execute commands, upload code, select arbitrary file paths, or change another node's configuration.
 
 ## Current safeguards
@@ -21,14 +21,15 @@ No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to ma
 - The HELLO/READY handshake has a strict field allowlist, protocol-version check, and fresh nonce confirmation.
 - Inbound/outbound connection workers are bounded; handshake reads have timeouts; pending and active sockets are closed during shutdown.
 - Length-prefixed frames are bounded before payload allocation.
-- Post-handshake application data is restricted to version-2 `EVENT` messages for `BLOCK_PLACE` and `BLOCK_BREAK`; exact message and attribute field sets are enforced.
+- Post-handshake messages are limited to the implemented, versioned protocol families: allowlisted version-2 `EVENT` messages for `BLOCK_PLACE`/`BLOCK_BREAK`, targeted gap-repair messages bound to an outstanding request, heartbeat control messages, and snapshot-transfer messages bound to an authenticated peer and active request. Each family has strict field, size, sequence, or state validation; this is not a general-purpose RPC protocol.
 - The claimed event origin must equal the authenticated peer ID, and the world must be in the configured shared-world allowlist.
 - Inbound events are stored in a separate SQLite inbox with WAL and FULL synchronous commits. Event IDs and origin sequences are unique; exact retries are idempotent and conflicting reuse is rejected.
 - An ACK is generated only after the inbox and per-block winner transaction commits. It confirms durable receipt and winner selection, not application to the Minecraft world.
 - Outbound delivery uses one in-flight event per peer, a bounded sender worker, and a durable per-peer cursor that advances only for the exact event acknowledged.
 - ACKs are matched to the outstanding event ID. A timeout or disconnect closes the session; reconnect replay resumes from the durable cursor and relies on receiver deduplication if the original ACK was lost.
 - TLS private keys and store passwords must remain outside source control. Supply passwords through the configured environment variables.
-- The plugin has no supported remote command or arbitrary code execution feature.
+- Snapshot transfer is receiver-side staging only: payloads are opaque bytes, limited to 512 MiB per snapshot, four active transfers globally, and 1 GiB reserved staging space. The receiver does not extract archives, deserialize Java objects, load classes, execute commands, mutate configuration, or install data into live worlds.
+- The plugin has no supported remote command, arbitrary file access, class loading, plugin installation, scripting, configuration mutation, or arbitrary code execution feature.
 
 ## Remote world-application limits
 
@@ -38,7 +39,8 @@ Never add remote console, command dispatch, class loading, scripting, plugin ins
 
 ## Release and repository hygiene
 
-- Review every source and dependency change before merging.
+- Review every source, workflow, build-script, and dependency change before merging; pay particular attention to new network message types, file writes, process execution, reflection/class loading, and permission changes.
+- Keep peer networking and remote block application disabled unless explicitly testing. A configured peer is a privileged replication trust relationship, not an untrusted public client.
 - Protect the default branch with required review and CI checks. Do not allow unreviewed direct pushes.
 - Pin GitHub Actions to immutable commit SHAs in release workflows and grant workflows only the permissions they need.
 - Generate an SBOM and scan dependencies before publishing a release. Review transitive dependencies as well as direct dependencies.
