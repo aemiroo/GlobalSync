@@ -75,6 +75,16 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                     )
                     """);
             statement.execute("""
+                    CREATE TABLE IF NOT EXISTS local_journal_state (
+                        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                        indexed_offset INTEGER NOT NULL CHECK (indexed_offset >= 0)
+                    )
+                    """);
+            statement.execute("""
+                    INSERT OR IGNORE INTO local_journal_state(singleton_id, indexed_offset)
+                    VALUES (1, 0)
+                    """);
+            statement.execute("""
                     INSERT OR IGNORE INTO lamport_state(singleton_id, clock_value)
                     VALUES (1, 0)
                     """);
@@ -92,7 +102,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
 
     /** Returns only after the inbound event and winner decision are durably committed. */
     public synchronized ReceivedEventReceipt accept(ReplicationEnvelope event) throws SQLException {
-        return acceptInternal(event, false);
+        return acceptInternal(event, false, 0);
     }
 
     /**
@@ -100,11 +110,45 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
      * participates in the same winner ordering as remote events.
      */
     public synchronized ReceivedEventReceipt acceptLocal(ReplicationEnvelope event) throws SQLException {
-        return acceptInternal(event, true);
+        return acceptInternal(event, true, 0);
     }
 
-    private ReceivedEventReceipt acceptInternal(ReplicationEnvelope event, boolean locallyApplied)
+    /**
+     * Indexes one committed local journal row. The checkpoint and block winner
+     * are committed together so startup recovery only scans rows not yet indexed.
+     */
+    public synchronized void indexLocalJournalEntry(ReplicationEnvelope event, long localOffset)
             throws SQLException {
+        if (localOffset < 1) throw new IllegalArgumentException("localOffset must be positive");
+        if (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(event.eventType())
+                || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(event.eventType())) {
+            acceptInternal(event, true, localOffset);
+            return;
+        }
+        try {
+            connection.setAutoCommit(false);
+            updateLocalJournalCheckpoint(localOffset);
+            connection.commit();
+        } catch (SQLException | RuntimeException exception) {
+            try { connection.rollback(); } catch (SQLException rollbackFailure) {
+                exception.addSuppressed(rollbackFailure);
+            }
+            throw exception;
+        } finally {
+            try { connection.setAutoCommit(true); } catch (SQLException ignored) { }
+        }
+    }
+
+    public synchronized long lastIndexedLocalJournalOffset() throws SQLException {
+        try (Statement query = connection.createStatement();
+             ResultSet result = query.executeQuery(
+                     "SELECT indexed_offset FROM local_journal_state WHERE singleton_id = 1")) {
+            return result.next() ? result.getLong(1) : 0L;
+        }
+    }
+
+    private ReceivedEventReceipt acceptInternal(ReplicationEnvelope event, boolean locallyApplied,
+                                                  long localOffset) throws SQLException {
         String payload = new String(ReplicationMessageCodec.encodeEvent(event), StandardCharsets.UTF_8);
         try {
             connection.setAutoCommit(false);
@@ -126,6 +170,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                     }
                     if (duplicateOffset != null) {
                         updateLamportClock(event.logicalClock());
+                        if (localOffset > 0) updateLocalJournalCheckpoint(localOffset);
                         boolean apply = isPendingWinner(event.eventId());
                         connection.commit();
                         return new ReceivedEventReceipt(duplicateOffset, true, apply);
@@ -161,6 +206,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                 setStatus(event.eventId(), "SUPERSEDED");
             }
             updateLamportClock(event.logicalClock());
+            if (localOffset > 0) updateLocalJournalCheckpoint(localOffset);
             boolean apply = winner && !locallyApplied;
             if (locallyApplied && !winner) {
                 apply = currentWinnerNeedsApplication(event);
@@ -416,6 +462,22 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                 "UPDATE received_events SET status = ? WHERE event_id = ?")) {
             update.setString(1, status);
             update.setString(2, eventId.toString());
+            update.executeUpdate();
+        }
+    }
+
+
+    private void updateLocalJournalCheckpoint(long localOffset) throws SQLException {
+        long current = lastIndexedLocalJournalOffset();
+        if (localOffset < current) {
+            throw new SQLException("Local journal index checkpoint cannot move backwards");
+        }
+        if (localOffset == current) return;
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE local_journal_state SET indexed_offset = ?
+                WHERE singleton_id = 1
+                """)) {
+            update.setLong(1, localOffset);
             update.executeUpdate();
         }
     }
