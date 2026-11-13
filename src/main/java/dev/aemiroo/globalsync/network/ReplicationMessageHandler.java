@@ -37,6 +37,21 @@ public final class ReplicationMessageHandler {
         this.rateLimiter = java.util.Objects.requireNonNull(rateLimiter, "rateLimiter");
     }
 
+    /** Returns the first durable sequence hole for an authenticated event origin. */
+    public long firstMissingSequenceForOrigin(String originServerId) throws IOException {
+        if (originServerId == null || !originServerId.matches("[A-Za-z0-9._-]{1,64}"))
+            throw new IOException("Invalid event origin");
+        try {
+            return receivedEvents.originSequenceProgress().stream()
+                    .filter(progress -> progress.originServerId().equals(originServerId))
+                    .filter(dev.aemiroo.globalsync.replication.OriginSequenceProgress::hasGap)
+                    .mapToLong(dev.aemiroo.globalsync.replication.OriginSequenceProgress::firstMissingSequence)
+                    .findFirst().orElse(0L);
+        } catch (SQLException exception) {
+            throw new IOException("Could not inspect durable origin sequence coverage", exception);
+        }
+    }
+
     public byte[] handle(byte[] payload, String authenticatedPeerId) throws IOException {
         if (payload == null || authenticatedPeerId == null || authenticatedPeerId.isBlank())
             throw new IOException("Missing replication payload or authenticated peer identity");
