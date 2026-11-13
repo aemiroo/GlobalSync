@@ -59,6 +59,9 @@ public final class PeerConnectionManager implements AutoCloseable {
             new PeerMessageRateLimiter(64, 10.0, 20.0, 16_384.0, 32_768.0);
     private final PeerMessageRateLimiter gapFrameRateLimiter =
             new PeerMessageRateLimiter(64, 10.0, 20.0, 1_048_576.0, 2_097_152.0);
+    private final PeerMessageRateLimiter snapshotRateLimiter =
+            new PeerMessageRateLimiter(64, 8.0, 16.0, 1_048_576.0, 2_097_152.0);
+    private volatile SnapshotStagingStore snapshotStagingStore;
     private final Map<String, PeerSession> connections = new ConcurrentHashMap<>();
     private final Set<Socket> pendingSockets = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
@@ -142,6 +145,21 @@ public final class PeerConnectionManager implements AutoCloseable {
             return thread;
         });
         this.heartbeatWorker.scheduleAtFixedRate(this::checkHeartbeats, 1, 1, TimeUnit.SECONDS);
+    }
+
+    /** Enables authenticated receiver-side snapshot staging for this manager. */
+    public PeerConnectionManager(SSLContext tlsContext, String localServerId,
+            PeerAuthorizationRegistry authorization, int maxFrameBytes, int maxConnections,
+            int handshakeTimeoutMillis, Logger logger, ReplicationMessageHandler messageHandler,
+            SqliteEventJournal eventJournal, int acknowledgementTimeoutMillis,
+            int deliveryPollMillis, int reconnectMinMillis, int reconnectMaxMillis,
+            int heartbeatIntervalMillis, int heartbeatTimeoutMillis,
+            SnapshotStagingStore snapshotStagingStore) {
+        this(tlsContext, localServerId, authorization, maxFrameBytes, maxConnections,
+                handshakeTimeoutMillis, logger, messageHandler, eventJournal,
+                acknowledgementTimeoutMillis, deliveryPollMillis, reconnectMinMillis,
+                reconnectMaxMillis, heartbeatIntervalMillis, heartbeatTimeoutMillis);
+        this.snapshotStagingStore = Objects.requireNonNull(snapshotStagingStore, "snapshotStagingStore");
     }
 
     private static ThreadPoolExecutor workerPool(int size, String name) {
@@ -293,6 +311,10 @@ public final class PeerConnectionManager implements AutoCloseable {
                 if (messageHandler == null) {
                     throw new IOException("Application messages are not enabled");
                 }
+                if (SnapshotTransferMessage.isSnapshotMessage(frame)) {
+                    handleSnapshotMessage(session, frame);
+                    continue;
+                }
                 if (GapRepairMessage.isGapMessage(frame)) {
                     handleGapMessage(session, frame);
                     continue;
@@ -322,6 +344,86 @@ public final class PeerConnectionManager implements AutoCloseable {
             pendingSockets.remove(socket);
             closeQuietly(socket);
         }
+    }
+
+    private void handleSnapshotMessage(PeerSession session, byte[] frame) throws IOException {
+        SnapshotStagingStore staging = snapshotStagingStore;
+        if (staging == null)
+            throw new IOException("Snapshot staging is not enabled for this peer session");
+        if (!snapshotRateLimiter.tryAcquire(session.peerId, frame.length))
+            throw new IOException("Peer exceeded the snapshot-transfer rate limit");
+
+        SnapshotTransferMessage.Message message = SnapshotTransferMessage.decode(frame);
+        switch (message.type()) {
+            case OFFER -> {
+                try {
+                    SnapshotTransferMessage.validateOfferAuthorization(
+                            message, session.peerId, messageHandler.sharedWorlds());
+                } catch (IOException exception) {
+                    SnapshotTransferMessage.RejectReason reason =
+                            message.manifest() != null
+                                    && !messageHandler.sharedWorlds().contains(message.manifest().worldId())
+                                    ? SnapshotTransferMessage.RejectReason.WORLD_NOT_SHARED
+                                    : SnapshotTransferMessage.RejectReason.POLICY_DENIED;
+                    session.write(SnapshotTransferMessage.encodeReject(
+                            message.requestId(), message.snapshotId(), reason));
+                    return;
+                }
+                SnapshotStagingStore.BeginResult result;
+                try {
+                    result = staging.begin(session.peerId, message.requestId(), message.manifest());
+                } catch (IOException exception) {
+                    logger.warning("Rejected snapshot offer from " + session.peerId + ": "
+                            + exception.getMessage());
+                    session.write(SnapshotTransferMessage.encodeReject(
+                            message.requestId(), message.snapshotId(),
+                            SnapshotTransferMessage.RejectReason.BUSY));
+                    return;
+                }
+                if (result.alreadyComplete()) {
+                    session.write(SnapshotTransferMessage.encodeComplete(
+                            message.requestId(), message.snapshotId()));
+                    return;
+                }
+                ActiveSnapshotTransfer active = new ActiveSnapshotTransfer(
+                        message.requestId(), message.snapshotId(), message.manifest());
+                ActiveSnapshotTransfer previous = session.activeSnapshotTransfer.get();
+                if (previous != null && (!previous.requestId.equals(active.requestId)
+                        || !previous.snapshotId.equals(active.snapshotId)))
+                    throw new IOException("Peer attempted to replace an active snapshot transfer");
+                session.activeSnapshotTransfer.set(active);
+                session.write(SnapshotTransferMessage.encodeAccept(
+                        message.requestId(), message.snapshotId()));
+            }
+            case CHUNK -> {
+                ActiveSnapshotTransfer active = requireActiveSnapshot(session, message);
+                SnapshotTransferMessage.validateChunkForManifest(message, active.manifest);
+                staging.append(session.peerId, message.requestId(), message.snapshotId(),
+                        message.chunkIndex(), message.chunkData());
+                session.write(SnapshotTransferMessage.encodeChunkAck(
+                        message.requestId(), message.snapshotId(), message.chunkIndex()));
+            }
+            case FINISH -> {
+                requireActiveSnapshot(session, message);
+                staging.finish(session.peerId, message.requestId(), message.snapshotId());
+                session.activeSnapshotTransfer.set(null);
+                session.write(SnapshotTransferMessage.encodeComplete(
+                        message.requestId(), message.snapshotId()));
+                logger.info("Snapshot staged and SHA-256 verified from " + session.peerId
+                        + " (" + message.snapshotId() + "). It has not been installed.");
+            }
+            case ACCEPT, REJECT, CHUNK_ACK, COMPLETE ->
+                    throw new IOException("Unexpected sender-side snapshot response on a receiving session");
+        }
+    }
+
+    private static ActiveSnapshotTransfer requireActiveSnapshot(
+            PeerSession session, SnapshotTransferMessage.Message message) throws IOException {
+        ActiveSnapshotTransfer active = session.activeSnapshotTransfer.get();
+        if (active == null || !active.requestId.equals(message.requestId())
+                || !active.snapshotId.equals(message.snapshotId()))
+            throw new IOException("Snapshot message does not match the active peer transfer");
+        return active;
     }
 
     private void requestFirstGap(PeerSession session) throws IOException {
@@ -569,6 +671,18 @@ public final class PeerConnectionManager implements AutoCloseable {
         try { closeable.close(); } catch (IOException ignored) { /* best-effort shutdown */ }
     }
 
+    private static final class ActiveSnapshotTransfer {
+        private final UUID requestId;
+        private final UUID snapshotId;
+        private final dev.aemiroo.globalsync.replication.SnapshotManifest manifest;
+        private ActiveSnapshotTransfer(UUID requestId, UUID snapshotId,
+                dev.aemiroo.globalsync.replication.SnapshotManifest manifest) {
+            this.requestId = requestId;
+            this.snapshotId = snapshotId;
+            this.manifest = manifest;
+        }
+    }
+
     private static final class PendingDelivery {
         private final JournalEntry entry;
         private final CompletableFuture<ReplicationAcknowledgement> future = new CompletableFuture<>();
@@ -616,6 +730,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         private final AtomicReference<PendingHeartbeat> pendingHeartbeat = new AtomicReference<>();
         private final AtomicReference<PendingGapRequest> pendingGapRequest = new AtomicReference<>();
         private final AtomicReference<ServedGapResponse> servedGapResponse = new AtomicReference<>();
+        private final AtomicReference<ActiveSnapshotTransfer> activeSnapshotTransfer = new AtomicReference<>();
         private final AtomicLong lastInboundNanos = new AtomicLong(System.nanoTime());
         private final AtomicLong heartbeatPongsReceived = new AtomicLong();
         private PeerSession(String peerId, SSLSocket socket, int maxFrameBytes) {
