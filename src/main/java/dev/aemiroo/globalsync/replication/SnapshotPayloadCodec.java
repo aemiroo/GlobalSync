@@ -58,7 +58,7 @@ public final class SnapshotPayloadCodec {
         if (expectedRecords < 0 || expectedRecords > MAX_BLOCK_RECORDS)
             throw new IOException("Snapshot block count exceeds the supported limit");
 
-        DataOutputStream data = new DataOutputStream(new BufferedOutputStream(output));
+        DataOutputStream data = new DataOutputStream(output);
         data.writeInt(MAGIC);
         data.writeByte(VERSION);
         data.writeInt((int) expectedRecords);
@@ -152,7 +152,12 @@ public final class SnapshotPayloadCodec {
     }
 
     private static boolean isValidBlockData(String value) {
-        return value.matches("[a-z0-9_.:/-]+(?:\\[[a-z0-9_.:/,=-]+\\])?");
+        int properties = value.indexOf('[');
+        String material = properties < 0 ? value : value.substring(0, properties);
+        int separator = material.indexOf(':');
+        if (separator < 1 || separator == material.length() - 1
+                || material.indexOf(':', separator + 1) >= 0) return false;
+        return value.matches("[a-z0-9_.-]+:[a-z0-9_./-]+(?:\\\\[[a-z0-9_./,=-]+\\\\])?");
     }
 
     private static String decodeStrict(byte[] bytes) throws IOException {
