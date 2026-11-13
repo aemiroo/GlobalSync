@@ -147,3 +147,10 @@ The receiver accepts only OFFER, CHUNK, and FINISH as inbound sender messages. A
 CHUNK_ACK is written only after the staged bytes have been forced to disk and the contiguous progress record has committed. Duplicate chunks below the committed index are acknowledged only when their bytes exactly match the staged content. FINISH produces COMPLETE only after exact byte length, expected chunk count, and SHA-256 verification. This completion signal is not a world-installation acknowledgement.
 
 The staging receiver uses a locally fixed directory and UUID-derived filenames. No protocol field can name a filesystem path or cause a remote file operation. The staging quota is 512 MiB per snapshot, four active transfers globally, one active transfer per peer, and 1 GiB total reserved storage. See [SNAPSHOTS.md](SNAPSHOTS.md) for restart recovery and retention behavior. The sender and snapshot installation are not yet implemented.
+
+
+## Snapshot payload byte format
+
+The manifest's `PAPER_BLOCK_DATA_V1` data format now has a deterministic binary framing codec, `SnapshotPayloadCodec`. It uses the `GSB1` magic, a one-byte payload version, an unsigned record count, and strictly coordinate-sorted block records containing signed x/y/z coordinates and bounded UTF-8 BlockData strings. The codec is streaming and rejects duplicate/out-of-order coordinates, malformed UTF-8, unsupported versions, incorrect counts, truncated records, and trailing bytes. See [SNAPSHOTS.md](SNAPSHOTS.md) for the exact field layout and capture limitations.
+
+This is a payload serialization contract only. It does not define a network message or enable snapshot capture/installation.
