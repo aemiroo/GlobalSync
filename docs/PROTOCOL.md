@@ -120,3 +120,10 @@ The inbox persists a winner per world coordinate. A stale event cannot replace a
 - Receiver-side deduplication must survive process restarts. The inbound SQLite inbox currently enforces this for received block-edit events.
 
 The local SQLite journal is the durable outgoing history for this node. Per-peer acknowledgement cursors are stored in the same database and survive restart. The in-memory EventDeduplicator remains only a bounded optimization and is not a substitute for durable receiver-side idempotency.
+
+
+## Snapshot manifest format
+
+The version-1 snapshot manifest and its strict canonical JSON codec are defined by `SnapshotManifest` and `SnapshotManifestCodec`. The manifest identifies one world and source node, carries an immutable snapshot UUID and payload SHA-256/length, and records `appliedThrough` as a per-origin vector of contiguous applied sequence numbers. Zero means no event from that origin is included. The source node must be present in the vector; at most 64 origins are accepted.
+
+The manifest format is not an EVENT protocol-version change and is not currently sent over peer connections. It is metadata only: there is no snapshot payload writer, transfer message, staging area, or installation path in this milestone. See [SNAPSHOTS.md](SNAPSHOTS.md) for the consistency boundary, event-overlap rules, and validation requirements.
