@@ -70,6 +70,12 @@ The local journal can produce a point-in-time delivery snapshot for each configu
 
 These are outbound-delivery diagnostics only. A successful ACK means the remote inbox durably accepted the event; it does not prove that the remote Paper world applied it. Local offsets are not comparable between nodes, and this status view does not detect missing remote-origin events or prove world equivalence. The status command performs its SQLite reads asynchronously and sends the result back on the Paper server thread.
 
+## Origin sequence-gap diagnostics
+
+The durable inbox groups received events by origin and scans each origin's sequence numbers from one through its highest observed sequence. If a later sequence exists while an earlier one is absent, `/globalsync status` reports the first missing sequence, highest observed sequence, and received event count. When the missing event later arrives through the existing ordered journal replay, the gap clears automatically. This is receive-side coverage over events retained in the local inbox; it does not infer gaps from local journal offsets or wall-clock timestamps.
+
+A reported gap is evidence that this replica has not durably received a sequence that a later event proves exists. It does not identify whether the cause is an in-flight event, an interrupted connection, or missing sender history. This milestone does not request selective retransmission, change ACK behavior, or repair world state. A replica with a gap must not be described as fully synchronized.
+
 ## Failure behavior
 
 A regional partition must not silently permit conflicting writes to the same authoritative state. Nodes should track their last committed offset, detect gaps, and resynchronize from the durable log or a snapshot. A disconnected region may continue read-only, or accept only operations explicitly safe to queue, until it can rejoin without creating split-brain state.
