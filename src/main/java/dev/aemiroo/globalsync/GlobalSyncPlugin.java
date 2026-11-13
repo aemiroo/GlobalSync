@@ -171,10 +171,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             return CompletableFuture.supplyAsync(() -> {
                 try {
                     long offset = eventJournal.append(envelope);
-                    if (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(envelope.eventType())
-                            || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(envelope.eventType())) {
-                        receivedEventStore.acceptLocal(envelope);
-                    }
+                    receivedEventStore.indexLocalJournalEntry(envelope, offset);
                     journalOffset.accumulateAndGet(offset, Math::max);
                     return offset;
                 } catch (SQLException exception) {
@@ -262,15 +259,12 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     }
 
     private void restoreLocalWinnerIndex() throws SQLException {
-        long cursor = 0;
+        long cursor = receivedEventStore.lastIndexedLocalJournalOffset();
         while (true) {
             List<dev.aemiroo.globalsync.replication.JournalEntry> entries = eventJournal.readAfter(cursor, 500);
             if (entries.isEmpty()) break;
             for (var entry : entries) {
-                if (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(entry.envelope().eventType())
-                        || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(entry.envelope().eventType())) {
-                    receivedEventStore.acceptLocal(entry.envelope());
-                }
+                receivedEventStore.indexLocalJournalEntry(entry.envelope(), entry.offset());
                 cursor = entry.offset();
             }
         }
