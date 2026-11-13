@@ -83,6 +83,12 @@ The receiver derives per-origin sequence coverage from the durable `received_eve
 
 The existing sender uses stop-and-wait journal delivery in origin sequence order, so ordinary reconnect replay should fill a transient gap. The diagnostic does not send a gap request, selectively retransmit, or change protocol messages. It cannot detect a missing tail event when no later sequence has arrived, and it cannot prove that the remote world applied received events. Inbox history is currently retained, which is required for this coverage calculation.
 
+## Selective gap-repair message format
+
+Protocol-v2 now defines strict `GAP_REQUEST`, `GAP_EVENT`, and `GAP_UNAVAILABLE` wire payloads. A request carries a fresh request UUID plus one exact origin server ID and positive origin sequence. An event response carries the original canonical EVENT payload unchanged; an unavailable response identifies the exact requested origin/sequence and uses the bounded `NOT_RETAINED` reason.
+
+These message encoders/decoders are protocol primitives only at this stage. They are not yet dispatched by the peer connection manager and do not trigger automatic requests or retransmission. When network dispatch is added, a receiver must bind the requested origin ID to the local node's own server ID before calling `findByOriginSequence`; requests for another origin must be rejected. A returned event must still pass the normal authenticated-origin, shared-world, payload, rate-limit, durable-inbox, and deduplication checks. The exact request UUID is for correlating a later response, not an authorization credential.
+
 ## Delivery requirements
 
 Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Heartbeat/liveness messages and a basic PONG counter are implemented. Remaining transport work includes broader operational metrics, configurable rate limits, and fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
