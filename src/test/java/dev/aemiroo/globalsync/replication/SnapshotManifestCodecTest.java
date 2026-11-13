@@ -69,6 +69,19 @@ class SnapshotManifestCodecTest {
     }
 
     @Test
+    void rejectsUnsortedOriginVectors() {
+        String encoded = new String(SnapshotManifestCodec.encode(manifest(Map.of("asia", 1L, "europe", 0L))),
+                StandardCharsets.UTF_8);
+        String reordered = encoded.replace(
+                "\"appliedThrough\":{\"asia\":1,\"europe\":0}",
+                "\"appliedThrough\":{\"europe\":0,\"asia\":1}");
+
+        assertNotEquals(encoded, reordered);
+        assertThrows(IOException.class,
+                () -> SnapshotManifestCodec.decode(reordered.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
     void rejectsNegativeFractionalAndOverflowingWatermarks() {
         String encoded = new String(SnapshotManifestCodec.encode(manifest(Map.of("asia", 1L))),
                 StandardCharsets.UTF_8);
