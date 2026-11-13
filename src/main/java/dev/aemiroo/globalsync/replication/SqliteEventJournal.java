@@ -50,6 +50,7 @@ public final class SqliteEventJournal implements AutoCloseable {
                         world_id TEXT NOT NULL,
                         origin_server_id TEXT NOT NULL,
                         origin_sequence INTEGER NOT NULL CHECK (origin_sequence > 0),
+                        logical_clock INTEGER NOT NULL CHECK (logical_clock > 0),
                         protocol_version INTEGER NOT NULL,
                         created_at TEXT NOT NULL,
                         event_type TEXT NOT NULL,
@@ -61,6 +62,7 @@ public final class SqliteEventJournal implements AutoCloseable {
                     CREATE INDEX IF NOT EXISTS idx_events_world_offset
                     ON events(world_id, journal_offset)
                     """);
+            ensureColumn("events", "logical_clock", "INTEGER NOT NULL DEFAULT 1");
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS peer_delivery (
                         peer_server_id TEXT PRIMARY KEY,
@@ -83,9 +85,9 @@ public final class SqliteEventJournal implements AutoCloseable {
     public synchronized long append(ReplicationEnvelope envelope) throws SQLException {
         String sql = """
                 INSERT INTO events (
-                    event_id, world_id, origin_server_id, origin_sequence,
-                    protocol_version, created_at, event_type, attributes_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    event_id, world_id, origin_server_id, origin_sequence, logical_clock,
+                    logical_clock, protocol_version, created_at, event_type, attributes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
 
         try (PreparedStatement insert = connection.prepareStatement(sql)) {
@@ -93,10 +95,11 @@ public final class SqliteEventJournal implements AutoCloseable {
             insert.setString(2, envelope.worldId());
             insert.setString(3, envelope.originServerId());
             insert.setLong(4, envelope.sequence());
-            insert.setInt(5, envelope.protocolVersion());
-            insert.setString(6, envelope.createdAt().toString());
-            insert.setString(7, envelope.eventType());
-            insert.setString(8, gson.toJson(envelope.attributes()));
+            insert.setLong(5, envelope.logicalClock());
+            insert.setInt(6, envelope.protocolVersion());
+            insert.setString(7, envelope.createdAt().toString());
+            insert.setString(8, envelope.eventType());
+            insert.setString(9, gson.toJson(envelope.attributes()));
             insert.executeUpdate();
             return lastInsertedOffset();
         } catch (SQLException insertFailure) {
@@ -246,6 +249,33 @@ public final class SqliteEventJournal implements AutoCloseable {
         }
     }
 
+
+    /** Highest Lamport clock persisted in this node's outgoing journal. */
+    public synchronized long lastLogicalClock() throws SQLException {
+        try (Statement query = connection.createStatement();
+             ResultSet result = query.executeQuery("SELECT COALESCE(MAX(logical_clock), 0) FROM events")) {
+            return result.next() ? result.getLong(1) : 0;
+        }
+    }
+
+    private void ensureColumn(String table, String column, String declaration) throws SQLException {
+        boolean present = false;
+        try (Statement query = connection.createStatement();
+             ResultSet result = query.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (result.next()) {
+                if (column.equalsIgnoreCase(result.getString("name"))) {
+                    present = true;
+                    break;
+                }
+            }
+        }
+        if (!present) {
+            try (Statement alter = connection.createStatement()) {
+                alter.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + declaration);
+            }
+        }
+    }
+
     public synchronized long size() throws SQLException {
         try (Statement query = connection.createStatement();
              ResultSet result = query.executeQuery("SELECT COUNT(*) FROM events")) {
@@ -288,6 +318,7 @@ public final class SqliteEventJournal implements AutoCloseable {
                 result.getString("world_id"),
                 result.getString("origin_server_id"),
                 result.getLong("origin_sequence"),
+                result.getLong("logical_clock"),
                 Instant.parse(result.getString("created_at")),
                 result.getString("event_type"),
                 attributes
