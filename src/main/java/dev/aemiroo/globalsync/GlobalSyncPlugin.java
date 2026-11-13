@@ -172,6 +172,11 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 try {
                     long offset = eventJournal.append(envelope);
                     receivedEventStore.indexLocalJournalEntry(envelope, offset);
+                    if (blockApplicationService != null
+                            && (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(envelope.eventType())
+                            || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(envelope.eventType()))) {
+                        blockApplicationService.requestReconcile(envelope);
+                    }
                     journalOffset.accumulateAndGet(offset, Math::max);
                     return offset;
                 } catch (SQLException exception) {
