@@ -11,6 +11,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -66,6 +67,17 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                         origin_sequence INTEGER NOT NULL,
                         block_data TEXT NOT NULL,
                         PRIMARY KEY (world_id, x, y, z)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS gap_recovery (
+                        origin_server_id TEXT NOT NULL,
+                        origin_sequence INTEGER NOT NULL CHECK (origin_sequence > 0),
+                        status TEXT NOT NULL CHECK (status IN ('REQUESTED', 'UNAVAILABLE')),
+                        first_detected_at INTEGER NOT NULL,
+                        last_checked_at INTEGER NOT NULL,
+                        unavailable_at INTEGER,
+                        PRIMARY KEY (origin_server_id, origin_sequence)
                     )
                     """);
             statement.execute("""
@@ -170,6 +182,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                         duplicateOffset = result.getLong("receipt_offset");
                     }
                     if (duplicateOffset != null) {
+                        clearGapRecovery(event.originServerId(), event.sequence());
                         updateLamportClock(event.logicalClock());
                         if (localOffset > 0) updateLocalJournalCheckpoint(localOffset);
                         boolean apply = isPendingWinner(event.eventId());
@@ -200,6 +213,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                 offset = result.getLong(1);
             }
 
+            clearGapRecovery(event.originServerId(), event.sequence());
             boolean winner = updateWinner(event);
             if (!winner) {
                 setStatus(event.eventId(), "SUPERSEDED");
@@ -296,6 +310,92 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
              ResultSet result = query.executeQuery("SELECT COUNT(*) FROM received_events")) {
             return result.next() ? result.getLong(1) : 0;
         }
+    }
+
+    /** Records that this node has checked/requested one exact missing origin sequence. */
+    public synchronized void markGapRequested(String originServerId, long sequence, Instant checkedAt)
+            throws SQLException {
+        validateGapKey(originServerId, sequence);
+        long checked = java.util.Objects.requireNonNull(checkedAt, "checkedAt").toEpochMilli();
+        try (PreparedStatement upsert = connection.prepareStatement("""
+                INSERT INTO gap_recovery
+                    (origin_server_id, origin_sequence, status, first_detected_at, last_checked_at, unavailable_at)
+                VALUES (?, ?, 'REQUESTED', ?, ?, NULL)
+                ON CONFLICT(origin_server_id, origin_sequence) DO UPDATE SET
+                    status = CASE WHEN gap_recovery.status = 'UNAVAILABLE'
+                                  THEN 'UNAVAILABLE' ELSE 'REQUESTED' END,
+                    last_checked_at = excluded.last_checked_at
+                """)) {
+            upsert.setString(1, originServerId);
+            upsert.setLong(2, sequence);
+            upsert.setLong(3, checked);
+            upsert.setLong(4, checked);
+            upsert.executeUpdate();
+        }
+    }
+
+    /** Persists the origin's definitive NOT_RETAINED response for one exact gap. */
+    public synchronized void markGapUnavailable(String originServerId, long sequence, Instant unavailableAt)
+            throws SQLException {
+        validateGapKey(originServerId, sequence);
+        long unavailable = java.util.Objects.requireNonNull(unavailableAt, "unavailableAt").toEpochMilli();
+        try (PreparedStatement upsert = connection.prepareStatement("""
+                INSERT INTO gap_recovery
+                    (origin_server_id, origin_sequence, status, first_detected_at, last_checked_at, unavailable_at)
+                VALUES (?, ?, 'UNAVAILABLE', ?, ?, ?)
+                ON CONFLICT(origin_server_id, origin_sequence) DO UPDATE SET
+                    status = 'UNAVAILABLE',
+                    last_checked_at = excluded.last_checked_at,
+                    unavailable_at = excluded.unavailable_at
+                """)) {
+            upsert.setString(1, originServerId);
+            upsert.setLong(2, sequence);
+            upsert.setLong(3, unavailable);
+            upsert.setLong(4, unavailable);
+            upsert.setLong(5, unavailable);
+            upsert.executeUpdate();
+        }
+    }
+
+    /** Returns every unresolved exact gap-recovery record in stable order. */
+    public synchronized List<GapRecoveryProgress> gapRecoveryProgress() throws SQLException {
+        List<GapRecoveryProgress> progress = new ArrayList<>();
+        try (Statement query = connection.createStatement();
+             ResultSet rows = query.executeQuery("""
+                     SELECT origin_server_id, origin_sequence, status,
+                            first_detected_at, last_checked_at, unavailable_at
+                     FROM gap_recovery
+                     ORDER BY origin_server_id, origin_sequence
+                     """)) {
+            while (rows.next()) {
+                long unavailable = rows.getLong("unavailable_at");
+                Long unavailableAt = rows.wasNull() ? null : unavailable;
+                progress.add(new GapRecoveryProgress(
+                        rows.getString("origin_server_id"),
+                        rows.getLong("origin_sequence"),
+                        rows.getString("status"),
+                        Instant.ofEpochMilli(rows.getLong("first_detected_at")),
+                        Instant.ofEpochMilli(rows.getLong("last_checked_at")),
+                        unavailableAt == null ? null : Instant.ofEpochMilli(unavailableAt)));
+            }
+        }
+        return List.copyOf(progress);
+    }
+
+    private void clearGapRecovery(String originServerId, long sequence) throws SQLException {
+        try (PreparedStatement delete = connection.prepareStatement("""
+                DELETE FROM gap_recovery WHERE origin_server_id = ? AND origin_sequence = ?
+                """)) {
+            delete.setString(1, originServerId);
+            delete.setLong(2, sequence);
+            delete.executeUpdate();
+        }
+    }
+
+    private static void validateGapKey(String originServerId, long sequence) {
+        if (originServerId == null || !originServerId.matches("[A-Za-z0-9._-]{1,64}"))
+            throw new IllegalArgumentException("Invalid gap origin server ID");
+        if (sequence < 1) throw new IllegalArgumentException("Gap sequence must be positive");
     }
 
     /**
