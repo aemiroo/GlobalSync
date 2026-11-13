@@ -62,17 +62,20 @@ class SqliteReceivedEventStoreTest {
     }
 
     @Test
-    void localEventsAreRecordedAsAlreadyAppliedAndClockSurvivesRestart() throws Exception {
+    void localEventsRemainPendingUntilWinnerReconciliationAndClockSurvivesRestart() throws Exception {
         Path database = directory.resolve("local.db");
         ReplicationEnvelope local = event("region-local", 1, 27, "minecraft:gold_block");
         try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(database)) {
-            assertFalse(store.acceptLocal(local).applyRequired());
+            assertTrue(store.acceptLocal(local).applyRequired());
             assertEquals(27, store.lastLogicalClock());
-            assertTrue(store.pendingWinners().isEmpty());
+            assertEquals(List.of(local.eventId()),
+                    store.pendingWinners().stream().map(ReplicationEnvelope::eventId).toList());
+            assertTrue(store.applyCurrentWinner(local.eventId(), () -> true));
         }
         try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
             assertEquals(27, recovered.lastLogicalClock());
             assertTrue(recovered.isCurrentWinner(local.eventId()));
+            assertTrue(recovered.pendingWinners().isEmpty());
         }
     }
 
@@ -93,11 +96,12 @@ class SqliteReceivedEventStoreTest {
             store.indexLocalJournalEntry(metadata, 2);
             assertEquals(2, store.lastIndexedLocalJournalOffset());
             assertTrue(store.isCurrentWinner(local.eventId()));
-            assertTrue(store.reconcileCurrentWinner(local.eventId(), () -> true));
+            assertTrue(store.applyCurrentWinner(local.eventId(), () -> true));
             ReplicationEnvelope newer = event("region-local", 2, 28, "minecraft:dirt");
             store.acceptLocal(newer);
-            assertFalse(store.reconcileCurrentWinner(local.eventId(), () -> { fail("stale event must not mutate"); return true; }));
-            assertTrue(store.reconcileCurrentWinner(newer.eventId(), () -> true));
+            assertFalse(store.applyCurrentWinner(local.eventId(),
+                    () -> { fail("stale event must not mutate"); return true; }));
+            assertTrue(store.applyCurrentWinner(newer.eventId(), () -> true));
         }
         try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
             assertEquals(2, recovered.lastIndexedLocalJournalOffset());
