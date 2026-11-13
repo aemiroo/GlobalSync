@@ -8,6 +8,11 @@ shared-worlds:
 capture:
   player-block-changes: true
 
+# Remote block application is separately opt-in. Only enable it in a controlled
+# test network with identical protocol versions and a backed-up test world.
+application:
+  enabled: false
+
 # Peer networking is opt-in. Leave disabled until every node has operator-
 # provisioned TLS stores and matching peer identity configuration.
 network:
