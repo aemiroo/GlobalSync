@@ -16,7 +16,7 @@ import java.util.UUID;
 
 /** Small, strict, bidirectional identity handshake. It does not carry replication events. */
 public final class PeerHandshake {
-    public static final int PROTOCOL_VERSION = 1;
+    public static final int PROTOCOL_VERSION = 3;
     private static final int MAX_HANDSHAKE_BYTES = 4_096;
     private static final Set<String> HELLO_FIELDS = Set.of("type", "protocolVersion", "serverId", "nonce");
     private static final Set<String> READY_FIELDS = Set.of("type", "nonce");
