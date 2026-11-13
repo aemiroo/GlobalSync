@@ -109,6 +109,40 @@ class PeerConnectionManagerIntegrationTest {
     }
 
     @Test
+    void keepsIdleAuthenticatedSessionAliveWithHeartbeatRoundTrips() throws Exception {
+        int portA = availablePort();
+        int portB;
+        do { portB = availablePort(); } while (portA == portB);
+        Path nodeA = testDirectory.resolve("heartbeat-a");
+        Path nodeB = testDirectory.resolve("heartbeat-b");
+        try (SqliteEventJournal journalA = new SqliteEventJournal(nodeA.resolve("events.db"));
+             SqliteEventJournal journalB = new SqliteEventJournal(nodeB.resolve("events.db"));
+             SqliteReceivedEventStore inboxA = new SqliteReceivedEventStore(nodeA.resolve("received.db"));
+             SqliteReceivedEventStore inboxB = new SqliteReceivedEventStore(nodeB.resolve("received.db"));
+             PeerConnectionManager managerA = new PeerConnectionManager(contextA, "a-region",
+                     new PeerAuthorizationRegistry(List.of(new PeerEndpoint("b-region", "127.0.0.1", portB, fingerprintB))),
+                     FrameCodec.DEFAULT_MAX_FRAME_BYTES, 4, 3_000,
+                     Logger.getLogger("GlobalSync-Heartbeat-Test"), new ReplicationMessageHandler(inboxA, java.util.Set.of("world")),
+                     journalA, 3_000, 50, 250, 2_000, 1_000, 3_000);
+             PeerConnectionManager managerB = new PeerConnectionManager(contextB, "b-region",
+                     new PeerAuthorizationRegistry(List.of(new PeerEndpoint("a-region", "127.0.0.1", portA, fingerprintA))),
+                     FrameCodec.DEFAULT_MAX_FRAME_BYTES, 4, 3_000,
+                     Logger.getLogger("GlobalSync-Heartbeat-Test"), new ReplicationMessageHandler(inboxB, java.util.Set.of("world")),
+                     journalB, 3_000, 50, 250, 2_000, 1_000, 3_000)) {
+            managerB.start(LOOPBACK, portB);
+            managerA.start(LOOPBACK, portA);
+            managerA.connectConfiguredPeers();
+            assertTrue(await(() -> managerA.connectedPeerCount() == 1 && managerB.connectedPeerCount() == 1,
+                    5, TimeUnit.SECONDS));
+            assertTrue(await(() -> managerA.heartbeatPongCount("b-region") > 0
+                    && managerB.heartbeatPongCount("a-region") > 0, 5, TimeUnit.SECONDS),
+                    "both idle peers should exchange and validate heartbeat responses");
+            assertEquals(1, managerA.connectedPeerCount());
+            assertEquals(1, managerB.connectedPeerCount());
+        }
+    }
+
+    @Test
     void rejectsPeerWithIncorrectPinnedFingerprint() throws Exception {
         int portA = availablePort();
         int portB = availablePort();
