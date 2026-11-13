@@ -274,7 +274,7 @@ public final class PeerConnectionManager implements AutoCloseable {
                 if (PeerControlMessage.isControl(frame)) {
                     if (!controlRateLimiter.tryAcquire(peerId, frame.length))
                         throw new IOException("Peer exceeded the control-message rate limit");
-                    PeerControlMessage control = PeerControlMessage.decode(frame);
+                    PeerControlMessage.Message control = PeerControlMessage.decode(frame);
                     if (control.type() == PeerControlMessage.Type.PING) {
                         session.write(PeerControlMessage.encodePong(control.nonce()));
                     } else {
