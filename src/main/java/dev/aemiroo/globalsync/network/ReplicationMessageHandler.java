@@ -90,4 +90,5 @@ public final class ReplicationMessageHandler {
         } catch (SQLException | JournalConflictException | IllegalStateException exception) {
             throw new IOException("Could not durably accept replication event", exception);
         }
-    }}
+    }
+}
