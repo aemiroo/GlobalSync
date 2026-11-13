@@ -5,6 +5,7 @@ import dev.aemiroo.globalsync.network.PeerAuthorizationRegistry;
 import dev.aemiroo.globalsync.network.PeerConnectionManager;
 import dev.aemiroo.globalsync.network.PeerEndpoint;
 import dev.aemiroo.globalsync.network.ReplicationMessageHandler;
+import dev.aemiroo.globalsync.network.SnapshotStagingStore;
 import dev.aemiroo.globalsync.network.TlsContextFactory;
 import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.BlockApplicationService;
@@ -54,6 +55,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
     private ExecutorService journalExecutor;
     private AtomicLong journalOffset;
     private PeerConnectionManager peerConnectionManager;
+    private SnapshotStagingStore snapshotStagingStore;
     private String serverId;
     private List<String> sharedWorlds;
     private boolean playerBlockCaptureEnabled;
@@ -108,7 +110,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         try {
             startPeerNetworkingIfEnabled();
             if (blockApplicationService != null) blockApplicationService.start();
-        } catch (IOException | GeneralSecurityException | RuntimeException exception) {
+        } catch (IOException | GeneralSecurityException | SQLException | RuntimeException exception) {
             getLogger().log(Level.SEVERE,
                     "Peer networking configuration or startup failed. GlobalSync will fail closed.", exception);
             closePeerNetworking();
@@ -368,7 +370,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         }
     }
 
-    private void startPeerNetworkingIfEnabled() throws IOException, GeneralSecurityException {
+    private void startPeerNetworkingIfEnabled() throws IOException, GeneralSecurityException, SQLException {
         ConfigurationSection network = getConfig().getConfigurationSection("network");
         if (network == null || !network.getBoolean("enabled", false)) {
             return;
@@ -432,6 +434,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         int heartbeatIntervalMillis = network.getInt("heartbeat-interval-ms", 15_000);
         int heartbeatTimeoutMillis = network.getInt("heartbeat-timeout-ms", 45_000);
         PeerAuthorizationRegistry authorization = new PeerAuthorizationRegistry(peers);
+        snapshotStagingStore = new SnapshotStagingStore(
+                getDataFolder().toPath().resolve("snapshots").resolve("staging"));
         peerConnectionManager = new PeerConnectionManager(
                 tlsContext,
                 serverId,
@@ -450,7 +454,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 reconnectMinMillis,
                 reconnectMaxMillis,
                 heartbeatIntervalMillis,
-                heartbeatTimeoutMillis
+                heartbeatTimeoutMillis,
+                snapshotStagingStore
         );
         InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
         int bindPort = network.getInt("bind-port", 28_120);
@@ -496,6 +501,15 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         if (peerConnectionManager != null) {
             peerConnectionManager.close();
             peerConnectionManager = null;
+        }
+        if (snapshotStagingStore != null) {
+            try {
+                snapshotStagingStore.close();
+            } catch (SQLException exception) {
+                getLogger().log(Level.SEVERE, "Could not close snapshot staging cleanly.", exception);
+            } finally {
+                snapshotStagingStore = null;
+            }
         }
     }
 
