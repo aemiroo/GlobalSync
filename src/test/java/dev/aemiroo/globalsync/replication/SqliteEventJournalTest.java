@@ -25,11 +25,13 @@ class SqliteEventJournalTest {
             assertEquals(1, journal.append(first));
             assertEquals(2, journal.append(second));
             assertEquals(2, journal.lastSequence("asia"));
+            assertEquals(2, journal.lastLogicalClock());
             assertEquals(2, journal.size());
         }
 
         try (SqliteEventJournal recovered = new SqliteEventJournal(database)) {
             assertEquals(2, recovered.lastSequence("asia"));
+            assertEquals(2, recovered.lastLogicalClock());
             assertEquals(2, recovered.lastOffset());
             var replay = recovered.readAfter(0, 1);
             assertEquals(1, replay.size());
