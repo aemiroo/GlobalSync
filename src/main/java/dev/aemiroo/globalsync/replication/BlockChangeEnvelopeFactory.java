@@ -26,6 +26,14 @@ public final class BlockChangeEnvelopeFactory {
                         "new_block_data", newBlockData));
     }
 
+    /** Compatibility overload for callers that have not yet supplied a world sequence. */
+    public static ReplicationEnvelope create(String eventType, String worldId,
+            String originServerId, long sequence, long logicalClock, UUID playerId,
+            int x, int y, int z, String previousBlockData, String newBlockData) {
+        return create(eventType, worldId, originServerId, sequence, sequence, logicalClock,
+                playerId, x, y, z, previousBlockData, newBlockData);
+    }
+
     /** Compatibility overload; production capture supplies a Lamport clock explicitly. */
     public static ReplicationEnvelope create(String eventType, String worldId,
             String originServerId, long sequence, UUID playerId,
