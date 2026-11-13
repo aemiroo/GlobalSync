@@ -39,6 +39,22 @@ public final class ReplicationMessageHandler {
 
     public Set<String> sharedWorlds() { return sharedWorlds; }
 
+    public void markGapRequested(String originServerId, long sequence) throws IOException {
+        try {
+            receivedEvents.markGapRequested(originServerId, sequence, java.time.Instant.now());
+        } catch (SQLException exception) {
+            throw new IOException("Could not persist gap-recovery request state", exception);
+        }
+    }
+
+    public void markGapUnavailable(String originServerId, long sequence) throws IOException {
+        try {
+            receivedEvents.markGapUnavailable(originServerId, sequence, java.time.Instant.now());
+        } catch (SQLException exception) {
+            throw new IOException("Could not persist unavailable gap-recovery state", exception);
+        }
+    }
+
     /** Returns the first durable sequence hole for an authenticated event origin. */
     public long firstMissingSequenceForOrigin(String originServerId) throws IOException {
         if (originServerId == null || !originServerId.matches("[A-Za-z0-9._-]{1,64}"))
