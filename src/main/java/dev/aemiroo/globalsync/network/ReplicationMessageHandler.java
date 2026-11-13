@@ -37,6 +37,8 @@ public final class ReplicationMessageHandler {
         this.rateLimiter = java.util.Objects.requireNonNull(rateLimiter, "rateLimiter");
     }
 
+    public Set<String> sharedWorlds() { return sharedWorlds; }
+
     /** Returns the first durable sequence hole for an authenticated event origin. */
     public long firstMissingSequenceForOrigin(String originServerId) throws IOException {
         if (originServerId == null || !originServerId.matches("[A-Za-z0-9._-]{1,64}"))
