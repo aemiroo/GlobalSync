@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class LogicalClock {
     /** Far beyond any practical event rate, while preventing remote clock poisoning. */
     public static final long MAX_VALUE = 1_000_000_000_000L;
+    public static final long MAX_REMOTE_VALUE = 1_000_000_000L;
     private final AtomicLong value;
 
     public LogicalClock() {
@@ -21,7 +22,7 @@ public final class LogicalClock {
 
     public LogicalClock(long initialValue) {
         if (initialValue < 0 || initialValue > MAX_VALUE) {
-            throw new IllegalArgumentException("initialValue must not be negative");
+            throw new IllegalArgumentException("initialValue is outside the supported range");
         }
         value = new AtomicLong(initialValue);
     }
@@ -39,12 +40,12 @@ public final class LogicalClock {
      * Records receipt of a remote event and advances beyond both known clocks.
      */
     public long observe(long remoteValue) {
-        if (remoteValue < 1 || remoteValue > MAX_VALUE) {
-            throw new IllegalArgumentException("remoteValue must be positive");
+        if (remoteValue < 1 || remoteValue > MAX_REMOTE_VALUE) {
+            throw new IllegalArgumentException("remoteValue is outside the accepted remote range");
         }
         return value.updateAndGet(current -> {
             long maximum = Math.max(current, remoteValue);
-            if (maximum == Long.MAX_VALUE) {
+            if (maximum >= MAX_VALUE) {
                 throw new IllegalStateException("Logical clock exhausted");
             }
             return maximum + 1;
