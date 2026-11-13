@@ -119,6 +119,27 @@ public final class SnapshotTransferMessage {
             throw new IOException("Snapshot world is not configured for sharing");
     }
 
+    /**
+     * Checks chunk bounds against the manifest negotiated for this transfer.
+     * Call this only after matching the active request and snapshot IDs.
+     */
+    public static void validateChunkForManifest(Message message, SnapshotManifest manifest)
+            throws IOException {
+        if (message == null || message.type() != Type.CHUNK || manifest == null
+                || !manifest.snapshotId().equals(message.snapshotId().toString())) {
+            throw new IOException("Snapshot chunk does not belong to the active manifest");
+        }
+        long chunkCount = (manifest.contentLengthBytes() + CHUNK_BYTES - 1) / CHUNK_BYTES;
+        if (message.chunkIndex() >= chunkCount) {
+            throw new IOException("Snapshot chunk index exceeds the manifest length");
+        }
+        long remaining = manifest.contentLengthBytes() - message.chunkIndex() * CHUNK_BYTES;
+        int expectedLength = (int) Math.min(CHUNK_BYTES, remaining);
+        if (message.chunkData() == null || message.chunkData().length != expectedLength) {
+            throw new IOException("Snapshot chunk length does not match its manifest position");
+        }
+    }
+
     public static Message decode(byte[] payload) throws IOException {
         JsonObject json = parse(payload);
         String type = string(json, "type");
