@@ -106,8 +106,9 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
     }
 
     /**
-     * Records a local event after Bukkit has already applied it. The event still
-     * participates in the same winner ordering as remote events.
+     * Records a local event after Bukkit has already applied it. It remains
+     * pending until the application service confirms that it is still the winner
+     * and the live block matches its resulting data.
      */
     public synchronized ReceivedEventReceipt acceptLocal(ReplicationEnvelope event) throws SQLException {
         return acceptInternal(event, true, 0);
@@ -200,14 +201,12 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
             }
 
             boolean winner = updateWinner(event);
-            if (winner && locallyApplied) {
-                setStatus(event.eventId(), "APPLIED");
-            } else if (!winner) {
+            if (!winner) {
                 setStatus(event.eventId(), "SUPERSEDED");
             }
             updateLamportClock(event.logicalClock());
             if (localOffset > 0) updateLocalJournalCheckpoint(localOffset);
-            boolean apply = winner && !locallyApplied;
+            boolean apply = winner;
             if (locallyApplied && !winner) {
                 apply = currentWinnerNeedsApplication(event);
             }
