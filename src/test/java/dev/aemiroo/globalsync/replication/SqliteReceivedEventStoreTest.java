@@ -48,6 +48,8 @@ class SqliteReceivedEventStoreTest {
                     store.pendingWinners().stream().map(ReplicationEnvelope::eventId).toList());
 
             AtomicInteger mutations = new AtomicInteger();
+            assertFalse(store.applyCurrentWinner(causallyLater.eventId(), () -> false));
+            assertEquals(1, store.pendingWinners().size());
             assertTrue(store.applyCurrentWinner(causallyLater.eventId(), () -> { mutations.incrementAndGet(); return true; }));
             assertFalse(store.applyCurrentWinner(causallyLater.eventId(), mutations::incrementAndGet));
             assertEquals(1, mutations.get());
