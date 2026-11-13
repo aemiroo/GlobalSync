@@ -97,7 +97,7 @@ The inbox persists a winner per world coordinate. A stale event cannot replace a
 ## Ordering and idempotency
 
 - Event IDs are used to recognize retries.
-- Per-origin sequence numbers provide uniqueness and origin-local identity. Explicit sequence-gap detection is not implemented yet.
+- Per-origin sequence numbers provide uniqueness and origin-local identity. The durable inbox now reports the first missing sequence when a later sequence from that origin has already been received. This is diagnostic only and does not yet trigger selective replay or snapshot recovery.
 - A durable global commit offset (or a well-defined per-world partitioned log) establishes application order.
 - Replaying an already committed event must not apply it twice.
 - Receiver-side deduplication must survive process restarts. The inbound SQLite inbox currently enforces this for received block-edit events.
