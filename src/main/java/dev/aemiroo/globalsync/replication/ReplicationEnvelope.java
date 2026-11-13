@@ -29,6 +29,14 @@ public record ReplicationEnvelope(
         attributes = Map.copyOf(attributes);
     }
 
+    /** Compatibility constructor for protocol-v2 callers with an explicit Lamport clock. */
+    public ReplicationEnvelope(int protocolVersion, UUID eventId, String worldId,
+            String originServerId, long sequence, long logicalClock, Instant createdAt,
+            String eventType, Map<String, String> attributes) {
+        this(protocolVersion, eventId, worldId, originServerId, sequence, sequence, logicalClock,
+                createdAt, eventType, attributes);
+    }
+
     /** Compatibility constructor; production capture supplies a Lamport clock explicitly. */
     public ReplicationEnvelope(int protocolVersion, UUID eventId, String worldId,
             String originServerId, long sequence, Instant createdAt, String eventType,
