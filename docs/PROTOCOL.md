@@ -46,7 +46,7 @@ A journal offset belongs to one database. It is not comparable across regions an
 
 ## Authenticated peer connection
 
-After the authenticated HELLO/READY handshake, the connection can receive version-2 EVENT frames. The transport HELLO/READY handshake remains protocol version 1; the application EVENT/ACK envelope is version 2. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the SQLite transaction commits. The sender reads the local journal in offset order, sends one event per peer at a time, and advances its durable per-peer cursor only after a matching ACK is received. The ACK's `journalOffset` is the receiver's inbox offset; the sender separately persists the corresponding local journal offset.
+After the authenticated HELLO/READY handshake, the connection can receive version-2 EVENT frames. The transport HELLO/READY handshake remains protocol version 1; the application EVENT/ACK envelope is version 2. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event and deterministic per-block winner decision in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the FULL-synchronous transaction commits. The sender reads the local journal in offset order, sends one event per peer at a time, and advances its durable per-peer cursor only after a matching ACK is received. The ACK's `journalOffset` is the receiver's inbox offset; the sender separately persists the corresponding local journal offset.
 
 - TLS 1.3 is required; the server requires a client certificate.
 - The TLS trust store validates the certificate chain. After the TLS handshake, the remote node must also present a leaf certificate whose SHA-256 fingerprint matches the configured fingerprint for its claimed server ID.
@@ -84,7 +84,7 @@ The inbox persists a winner per world coordinate. A stale event cannot replace a
 ## Ordering and idempotency
 
 - Event IDs are used to recognize retries.
-- Per-origin sequence numbers detect gaps from one node.
+- Per-origin sequence numbers provide uniqueness and origin-local identity. Explicit sequence-gap detection is not implemented yet.
 - A durable global commit offset (or a well-defined per-world partitioned log) establishes application order.
 - Replaying an already committed event must not apply it twice.
 - Receiver-side deduplication must survive process restarts. The inbound SQLite inbox currently enforces this for received block-edit events.
