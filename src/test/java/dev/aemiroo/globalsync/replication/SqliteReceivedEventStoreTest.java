@@ -78,6 +78,27 @@ class SqliteReceivedEventStoreTest {
 
 
 
+
+    @Test
+    void localJournalIndexCheckpointAdvancesAndSurvivesRestart() throws Exception {
+        Path database = directory.resolve("checkpoint.db");
+        ReplicationEnvelope local = event("region-local", 1, 1, "minecraft:stone");
+        ReplicationEnvelope metadata = new ReplicationEnvelope(
+                ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), "world",
+                "region-local", 2, 2, Instant.parse("2026-11-13T00:00:00Z"),
+                "IGNORED_LOCAL_METADATA", Map.of("value", "safe"));
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(database)) {
+            assertEquals(0, store.lastIndexedLocalJournalOffset());
+            store.indexLocalJournalEntry(local, 1);
+            store.indexLocalJournalEntry(metadata, 2);
+            assertEquals(2, store.lastIndexedLocalJournalOffset());
+            assertTrue(store.isCurrentWinner(local.eventId()));
+        }
+        try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
+            assertEquals(2, recovered.lastIndexedLocalJournalOffset());
+        }
+    }
+
     @Test
     void migratesPreviouslyReceivedV1EventsAndRecognizesTheirV2Replay() throws Exception {
         Path database = directory.resolve("legacy.db");
