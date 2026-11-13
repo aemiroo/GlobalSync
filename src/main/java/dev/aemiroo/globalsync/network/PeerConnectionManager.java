@@ -57,6 +57,8 @@ public final class PeerConnectionManager implements AutoCloseable {
     private final ScheduledExecutorService heartbeatWorker;
     private final PeerMessageRateLimiter controlRateLimiter =
             new PeerMessageRateLimiter(64, 10.0, 20.0, 16_384.0, 32_768.0);
+    private final PeerMessageRateLimiter gapFrameRateLimiter =
+            new PeerMessageRateLimiter(64, 10.0, 20.0, 1_048_576.0, 2_097_152.0);
     private final Map<String, PeerSession> connections = new ConcurrentHashMap<>();
     private final Set<Socket> pendingSockets = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
@@ -338,6 +340,8 @@ public final class PeerConnectionManager implements AutoCloseable {
     }
 
     private void handleGapMessage(PeerSession session, byte[] frame) throws IOException {
+        if (!gapFrameRateLimiter.tryAcquire(session.peerId, frame.length))
+            throw new IOException("Peer exceeded the gap-repair frame rate limit");
         GapRepairMessage.Message message = GapRepairMessage.decode(frame);
         if (message.type() != GapRepairMessage.Type.EVENT
                 && !controlRateLimiter.tryAcquire(session.peerId, frame.length))
@@ -375,8 +379,8 @@ public final class PeerConnectionManager implements AutoCloseable {
                 throw new IOException("Peer requested an event that does not originate from this server");
             ServedGapResponse current = session.servedGapResponse.get();
             if (current != null) {
-                if (!current.requestId.equals(message.requestId()))
-                    throw new IOException("Peer already has an outstanding gap response");
+                if (!current.requestId.equals(message.requestId()) || current.sequence != message.sequence())
+                    throw new IOException("Peer already has a different outstanding gap response");
                 session.write(current.frame);
                 return;
             }
@@ -389,7 +393,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             } else {
                 response = GapRepairMessage.encodeUnavailable(message.requestId(), localServerId, message.sequence());
             }
-            ServedGapResponse served = new ServedGapResponse(message.requestId(), eventId, response);
+            ServedGapResponse served = new ServedGapResponse(message.requestId(), message.sequence(), eventId, response);
             if (!session.servedGapResponse.compareAndSet(null, served)) {
                 ServedGapResponse raced = session.servedGapResponse.get();
                 if (raced == null || !raced.requestId.equals(message.requestId()))
@@ -413,6 +417,9 @@ public final class PeerConnectionManager implements AutoCloseable {
     }
 
     private void checkGapRequestTimeout(PeerSession session, long now) {
+        ServedGapResponse served = session.servedGapResponse.get();
+        if (served != null && now - served.sentAtNanos >= TimeUnit.MILLISECONDS.toNanos(acknowledgementTimeoutMillis))
+            session.servedGapResponse.compareAndSet(served, null);
         PendingGapRequest pending = session.pendingGapRequest.get();
         if (pending == null || now - pending.sentAtNanos
                 < TimeUnit.MILLISECONDS.toNanos(acknowledgementTimeoutMillis)) return;
@@ -573,10 +580,13 @@ public final class PeerConnectionManager implements AutoCloseable {
 
     private static final class ServedGapResponse {
         private final UUID requestId;
+        private final long sequence;
         private final UUID eventId;
         private final byte[] frame;
-        private ServedGapResponse(UUID requestId, UUID eventId, byte[] frame) {
-            this.requestId = requestId; this.eventId = eventId; this.frame = frame.clone();
+        private final long sentAtNanos;
+        private ServedGapResponse(UUID requestId, long sequence, UUID eventId, byte[] frame) {
+            this.requestId = requestId; this.sequence = sequence; this.eventId = eventId;
+            this.frame = frame.clone(); this.sentAtNanos = System.nanoTime();
         }
     }
 
