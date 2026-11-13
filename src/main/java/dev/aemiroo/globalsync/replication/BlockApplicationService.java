@@ -144,10 +144,10 @@ public final class BlockApplicationService implements AutoCloseable {
                         return;
                     }
 
-                    BlockData blockData = Bukkit.createBlockData(resultingData);
-                    Block block = world.getBlockAt(x, y, z);
                     String expectedPrevious = event.attributes().get("previous_block_data");
                     String resultingData = event.attributes().get("new_block_data");
+                    BlockData blockData = Bukkit.createBlockData(resultingData);
+                    Block block = world.getBlockAt(x, y, z);
                     String actual = block.getBlockData().getAsString();
                     if (actual.equals(resultingData)) {
                         result.complete(true);
