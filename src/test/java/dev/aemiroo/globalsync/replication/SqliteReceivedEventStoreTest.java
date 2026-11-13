@@ -173,6 +173,39 @@ class SqliteReceivedEventStoreTest {
     }
 
     @Test
+    void detectsFirstMissingSequencePerOriginAndClearsGapWhenLateEventArrives() throws Exception {
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("gaps.db"))) {
+            store.accept(event("region-alpha", 1, 1, "minecraft:stone"));
+            store.accept(event("region-alpha", 2, 2, "minecraft:dirt"));
+            store.accept(event("region-alpha", 4, 4, "minecraft:glass"));
+            store.accept(event("region-beta", 1, 1, "minecraft:oak_planks"));
+            store.accept(event("region-beta", 3, 3, "minecraft:bricks"));
+
+            var initial = store.originSequenceProgress();
+            assertEquals(2, initial.size());
+            var alpha = initial.get(0);
+            assertEquals("region-alpha", alpha.originServerId());
+            assertEquals(3, alpha.receivedEvents());
+            assertEquals(4, alpha.highestObservedSequence());
+            assertEquals(3, alpha.firstMissingSequence());
+            assertTrue(alpha.hasGap());
+
+            var beta = initial.get(1);
+            assertEquals("region-beta", beta.originServerId());
+            assertEquals(2, beta.receivedEvents());
+            assertEquals(2, beta.firstMissingSequence());
+            assertTrue(beta.hasGap());
+
+            store.accept(event("region-alpha", 3, 5, "minecraft:granite"));
+            store.accept(event("region-beta", 2, 2, "minecraft:andesite"));
+            var repaired = store.originSequenceProgress();
+            assertTrue(repaired.stream().noneMatch(OriginSequenceProgress::hasGap));
+            assertEquals(0, repaired.get(0).firstMissingSequence());
+            assertEquals(0, repaired.get(1).firstMissingSequence());
+        }
+    }
+
+    @Test
     void exactRetriesRemainIdempotentAndConflictingReuseIsRejected() throws Exception {
         try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("retry.db"))) {
             ReplicationEnvelope original = event("region-alpha", 1, 1, "minecraft:stone");
