@@ -109,6 +109,18 @@ class ReplicationMessageHandlerTest {
         }
     }
 
+    @Test
+    void gapResponseMustMatchRequestedSequenceBeforeDurableAcceptance() throws Exception {
+        try (SqliteReceivedEventStore journal = new SqliteReceivedEventStore(directory.resolve("gap-response.db"))) {
+            ReplicationMessageHandler handler = new ReplicationMessageHandler(journal, Set.of("world"));
+            byte[] payload = ReplicationMessageCodec.encodeEvent(event());
+            assertThrows(java.io.IOException.class, () -> handler.handleGapResponse(payload, "region-eu", 2));
+            assertEquals(0, journal.size(), "a mismatched targeted response must not enter the durable inbox");
+            assertEquals(event().eventId(), handler.handleGapResponse(payload, "region-eu", 1));
+            assertEquals(1, journal.size());
+        }
+    }
+
     private static ReplicationEnvelope event() {
         return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.fromString("9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1"),
                 "world", "region-eu", 1, Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE",
