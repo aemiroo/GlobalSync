@@ -154,3 +154,10 @@ The staging receiver uses a locally fixed directory and UUID-derived filenames. 
 The manifest's `PAPER_BLOCK_DATA_V1` data format now has a deterministic binary framing codec, `SnapshotPayloadCodec`. It uses the `GSB1` magic, a one-byte payload version, an unsigned record count, and strictly coordinate-sorted block records containing signed x/y/z coordinates and bounded UTF-8 BlockData strings. The codec is streaming and rejects duplicate/out-of-order coordinates, malformed UTF-8, unsupported versions, incorrect counts, truncated records, and trailing bytes. See [SNAPSHOTS.md](SNAPSHOTS.md) for the exact field layout and capture limitations.
 
 This is a payload serialization contract only. It does not define a network message or enable snapshot capture/installation.
+
+
+## World-local applied coverage
+
+Protocol-v3 event envelopes carry both the per-origin delivery sequence and a world-local sequence. The receiver persists both values. The delivery sequence continues to drive transport ordering and gap recovery; the world-local sequence is used only for per-world snapshot coverage.
+
+A receiver reports a contiguous applied-through watermark for each world and origin only after an event's winning block mutation has succeeded on the Paper thread and the event is durably marked `APPLIED`. Pending, received-only, and superseded events do not count. Legacy inbox rows are migrated with world sequence zero and are excluded rather than assigned a guessed value. See [SNAPSHOTS.md](SNAPSHOTS.md).
