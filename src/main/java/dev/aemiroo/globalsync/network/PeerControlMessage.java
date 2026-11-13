@@ -28,13 +28,20 @@ public final class PeerControlMessage {
         return json.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    public static boolean isControl(byte[] payload) throws IOException {
-        JsonObject json = parse(payload, FrameCodec.DEFAULT_MAX_FRAME_BYTES);
-        var typeElement = json.get("type");
-        if (typeElement == null || !typeElement.isJsonPrimitive()
-                || !typeElement.getAsJsonPrimitive().isString()) return false;
-        String type = typeElement.getAsString();
-        return "PING".equals(type) || "PONG".equals(type);
+    public static boolean isControl(byte[] payload) {
+        // Encoders emit canonical JSON with "type" as the first field. A byte
+        // prefix check avoids parsing every EVENT before its own rate limiter.
+        return startsWith(payload, "{\"type\":\"PING\"")
+                || startsWith(payload, "{\"type\":\"PONG\"");
+    }
+
+    private static boolean startsWith(byte[] payload, String prefix) {
+        if (payload == null || payload.length < prefix.length()) return false;
+        byte[] expected = prefix.getBytes(StandardCharsets.US_ASCII);
+        for (int i = 0; i < expected.length; i++) {
+            if (payload[i] != expected[i]) return false;
+        }
+        return true;
     }
 
     public static Message decode(byte[] payload) throws IOException {
