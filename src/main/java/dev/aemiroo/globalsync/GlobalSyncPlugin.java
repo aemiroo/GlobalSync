@@ -10,6 +10,7 @@ import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.BlockApplicationService;
 import dev.aemiroo.globalsync.replication.LogicalClock;
 import dev.aemiroo.globalsync.replication.PeerReplicationProgress;
+import dev.aemiroo.globalsync.replication.OriginSequenceProgress;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
@@ -285,6 +286,39 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                     getLogger().log(Level.WARNING, "Could not read peer replication progress.", exception);
                     Bukkit.getScheduler().runTask(this,
                             () -> sender.sendMessage("§cCould not read peer replication progress. Check the server log."));
+                }
+            });
+        }
+
+        if (receivedEventStore != null) {
+            sender.sendMessage("§7Origin sequence coverage: §fchecking durable inbox...");
+            Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                try {
+                    List<OriginSequenceProgress> origins = receivedEventStore.originSequenceProgress();
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        sender.sendMessage("§6Inbound origin sequence coverage");
+                        if (origins.isEmpty()) {
+                            sender.sendMessage("§7No received origin events yet.");
+                            return;
+                        }
+                        for (OriginSequenceProgress origin : origins) {
+                            if (origin.hasGap()) {
+                                sender.sendMessage("§c" + origin.originServerId() + " §7GAP"
+                                        + " §8| §7missing first: §f" + origin.firstMissingSequence()
+                                        + " §8| §7highest seen: §f" + origin.highestObservedSequence()
+                                        + " §8| §7received: §f" + origin.receivedEvents());
+                            } else {
+                                sender.sendMessage("§a" + origin.originServerId() + " §7CONTIGUOUS"
+                                        + " §8| §7through: §f" + origin.highestObservedSequence()
+                                        + " §8| §7received: §f" + origin.receivedEvents());
+                            }
+                        }
+                        sender.sendMessage("§8A gap is diagnostic; no automatic replay or world repair is triggered.");
+                    });
+                } catch (SQLException exception) {
+                    getLogger().log(Level.WARNING, "Could not read origin sequence coverage.", exception);
+                    Bukkit.getScheduler().runTask(this,
+                            () -> sender.sendMessage("§cCould not read origin sequence coverage. Check the server log."));
                 }
             });
         }

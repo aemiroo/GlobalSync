@@ -102,6 +102,6 @@ Each pair uses the lexicographically lower server ID as the outbound dialer. Bot
 
 The local outgoing event database is stored at `plugins/GlobalSync/journal/events.db`; the durable inbound inbox is `plugins/GlobalSync/journal/received.db`. Back them up with the server stopped or by using a SQLite-aware backup method.
 
-Use `/globalsync status` to inspect the current node, capture state, journal offset, authenticated peer count, and each configured peer's delivery state. Peer progress shows the local acknowledgement cursor, local journal head, pending event count, oldest pending event age, and valid heartbeat PONG count. The command reads SQLite progress asynchronously and returns the result on the server thread.
+Use `/globalsync status` to inspect the current node, capture state, journal offset, authenticated peer count, and each configured peer's delivery state. Peer progress shows the local acknowledgement cursor, local journal head, pending event count, oldest pending event age, and valid heartbeat PONG count. It also reports receive-side sequence coverage per origin and identifies the first missing sequence when a later sequence has already arrived. These SQLite reads run asynchronously and results are returned on the server thread. Sequence gaps are diagnostic only; they do not yet trigger replay or snapshot repair.
 
 See [the architecture notes](docs/ARCHITECTURE.md), [the protocol notes](docs/PROTOCOL.md), and [the security policy](SECURITY.md) for implementation boundaries and operational requirements.
