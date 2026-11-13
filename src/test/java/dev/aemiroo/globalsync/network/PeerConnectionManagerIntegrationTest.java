@@ -216,7 +216,7 @@ class PeerConnectionManagerIntegrationTest {
     }
 
     private static ReplicationEnvelope blockEvent(String origin, long sequence) {
-        return new ReplicationEnvelope(1, UUID.randomUUID(), "world", origin, sequence,
+        return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), "world", origin, sequence,
                 Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE",
                 Map.of("player_uuid", "d6a9b5df-1b1d-4b17-9f45-9f9b9f1b7d11",
                         "x", "12", "y", "64", "z", "-4",
