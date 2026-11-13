@@ -127,3 +127,12 @@ The local SQLite journal is the durable outgoing history for this node. Per-peer
 The version-1 snapshot manifest and its strict canonical JSON codec are defined by `SnapshotManifest` and `SnapshotManifestCodec`. The manifest identifies one world and source node, carries an immutable snapshot UUID and payload SHA-256/length, and records `appliedThrough` as a per-origin vector of contiguous applied sequence numbers. Zero means no event from that origin is included. The source node must be present in the vector; at most 64 origins are accepted.
 
 The manifest format is not an EVENT protocol-version change and is not currently sent over peer connections. It is metadata only: there is no snapshot payload writer, transfer message, staging area, or installation path in this milestone. See [SNAPSHOTS.md](SNAPSHOTS.md) for the consistency boundary, event-overlap rules, and validation requirements.
+
+
+## Snapshot-transfer message contract
+
+Protocol-v2 snapshot transfer frames are defined by `SnapshotTransferMessage`. The message family contains OFFER, ACCEPT, REJECT, CHUNK, CHUNK_ACK, FINISH, and COMPLETE. Offers carry the canonical snapshot manifest; chunks carry at most 256 KiB of canonical Base64 payload and are individually indexed. Every frame is bounded by the existing 1 MiB frame limit.
+
+Snapshot transfer is not a new trust channel. Future dispatch must occur only after the existing mutually authenticated TLS and pinned-certificate peer handshake. The offer's source server ID must equal the authenticated peer ID, and its world must be present in the local shared-world allowlist. The manifest then binds the payload length, SHA-256, snapshot ID, format, and applied-through vector. Chunk processing must match the active request and snapshot IDs and enforce the exact chunk count and byte length derived from the manifest.
+
+This commit adds the strict wire codec and validation primitives only. It does not connect a transfer handler to live peer sessions or enable file transfer. No remote path, command, plugin, or configuration operation is represented by these message types. See [SNAPSHOTS.md](SNAPSHOTS.md) for the security and lifecycle boundary.
