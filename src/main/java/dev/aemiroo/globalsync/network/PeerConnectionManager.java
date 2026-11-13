@@ -331,8 +331,8 @@ public final class PeerConnectionManager implements AutoCloseable {
         PendingGapRequest pending = new PendingGapRequest(UUID.randomUUID(), missing, System.nanoTime(), 0);
         if (!session.pendingGapRequest.compareAndSet(null, pending)) return;
         try {
-            messageHandler.markGapRequested(session.peerId, missing);
             session.write(GapRepairMessage.encodeRequest(pending.requestId, session.peerId, missing));
+            messageHandler.markGapRequested(session.peerId, missing);
             logger.info("Requested missing event " + session.peerId + "#" + missing);
         } catch (IOException exception) {
             session.pendingGapRequest.compareAndSet(pending, null);
@@ -439,8 +439,8 @@ public final class PeerConnectionManager implements AutoCloseable {
                 now, pending.retries + 1);
         if (!session.pendingGapRequest.compareAndSet(pending, retry)) return;
         try {
-            messageHandler.markGapRequested(session.peerId, retry.sequence);
             session.write(GapRepairMessage.encodeRequest(retry.requestId, session.peerId, retry.sequence));
+            messageHandler.markGapRequested(session.peerId, retry.sequence);
         } catch (IOException exception) {
             session.close();
         }
