@@ -39,7 +39,7 @@ Each node writes accepted outgoing events to its own SQLite journal before attem
 - The pair of origin node ID and origin sequence is also unique.
 - Retrying the exact same envelope returns its original journal offset.
 - Reusing an event ID or origin sequence for different data is rejected.
-- The node restores its next sequence from the maximum sequence already persisted for that origin.
+- The node restores its next sequence from the maximum sequence already persisted for that origin. Existing v1 outgoing journal rows are migrated to v2 with a bounded logical-clock seed derived from their origin sequence. Existing v1 inbox rows are migrated to canonical v2 payloads and inserted into the winner index so an unacknowledged replay is still recognized as the same event.
 - Replay reads entries after a local journal offset in ascending order.
 
 A journal offset belongs to one database. It is not comparable across regions and is not a global commit index. The current implementation does not yet prune acknowledged entries or coordinate retention across peers.
