@@ -317,22 +317,30 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                 String origin = result.getString("origin_server_id");
                 long received = result.getLong("received_count");
                 long highest = result.getLong("highest_sequence");
-                long expected = 1L;
-                try (PreparedStatement sequences = connection.prepareStatement("""
-                        SELECT origin_sequence FROM received_events
-                        WHERE origin_server_id = ?
-                        ORDER BY origin_sequence ASC
-                        """)) {
-                    sequences.setString(1, origin);
-                    try (ResultSet sequenceRows = sequences.executeQuery()) {
-                        while (sequenceRows.next()) {
-                            long sequence = sequenceRows.getLong(1);
-                            if (sequence > expected) break;
-                            if (sequence == expected) expected++;
+                long firstMissing = 0L;
+                // With positive unique sequences, count == max proves the full
+                // range 1..max is present without scanning every row.
+                if (received < highest) {
+                    long expected = 1L;
+                    try (PreparedStatement sequences = connection.prepareStatement("""
+                            SELECT origin_sequence FROM received_events
+                            WHERE origin_server_id = ?
+                            ORDER BY origin_sequence ASC
+                            """)) {
+                        sequences.setString(1, origin);
+                        try (ResultSet sequenceRows = sequences.executeQuery()) {
+                            while (sequenceRows.next()) {
+                                long sequence = sequenceRows.getLong(1);
+                                if (sequence > expected) {
+                                    firstMissing = expected;
+                                    break;
+                                }
+                                if (sequence == expected) expected++;
+                            }
                         }
                     }
+                    if (firstMissing == 0L && expected <= highest) firstMissing = expected;
                 }
-                long firstMissing = expected <= highest ? expected : 0L;
                 progress.add(new OriginSequenceProgress(origin, received, highest, firstMissing));
             }
         }
