@@ -126,27 +126,27 @@ The local SQLite journal is the durable outgoing history for this node. Per-peer
 
 The version-1 snapshot manifest and its strict canonical JSON codec are defined by `SnapshotManifest` and `SnapshotManifestCodec`. The manifest identifies one world and source node, carries an immutable snapshot UUID and payload SHA-256/length, and records `appliedThrough` as a per-origin vector of contiguous applied sequence numbers. Zero means no event from that origin is included. The source node must be present in the vector; at most 64 origins are accepted.
 
-The manifest format is not an EVENT protocol-version change and is not currently sent over peer connections. It is metadata only: there is no snapshot payload writer, transfer message, staging area, or installation path in this milestone. See [SNAPSHOTS.md](SNAPSHOTS.md) for the consistency boundary, event-overlap rules, and validation requirements.
+The manifest format is not an EVENT protocol-version change. It is carried by snapshot OFFER frames and binds a payload's length, SHA-256, identity, world, format, and per-origin applied-through vector. There is still no capture-to-manifest payload producer or installation path. See [SNAPSHOTS.md](SNAPSHOTS.md) for the consistency boundary, event-overlap rules, and validation requirements.
 
 
 ## Snapshot-transfer message contract
 
 Protocol-v2 snapshot transfer frames are defined by `SnapshotTransferMessage`. The message family contains OFFER, ACCEPT, REJECT, CHUNK, CHUNK_ACK, FINISH, and COMPLETE. Offers carry the canonical snapshot manifest; chunks carry at most 256 KiB of canonical Base64 payload and are individually indexed. Every frame is bounded by the existing 1 MiB frame limit.
 
-Snapshot transfer is not a new trust channel. Future dispatch must occur only after the existing mutually authenticated TLS and pinned-certificate peer handshake. The offer's source server ID must equal the authenticated peer ID, and its world must be present in the local shared-world allowlist. The manifest then binds the payload length, SHA-256, snapshot ID, format, and applied-through vector. Chunk processing must match the active request and snapshot IDs and enforce the exact chunk count and byte length derived from the manifest.
+Snapshot transfer is not a new trust channel. Dispatch occurs only after the existing mutually authenticated TLS and pinned-certificate peer handshake. The receiver checks the offer's source server ID against the authenticated peer and requires its world in the local shared-world allowlist. The sender checks the destination is an authorized connected peer, verifies the local source ID and shared world, and verifies the local payload file against the manifest's exact length and SHA-256. Chunk processing matches the active request and snapshot IDs and enforces the exact chunk count and byte length derived from the manifest.
 
-This commit adds the strict wire codec and validation primitives only. It does not connect a transfer handler to live peer sessions or enable file transfer. No remote path, command, plugin, or configuration operation is represented by these message types. See [SNAPSHOTS.md](SNAPSHOTS.md) for the security and lifecycle boundary.
+The strict wire codec, authenticated peer-session dispatch, receiver staging, and asynchronous stop-and-wait sender are connected. A caller supplies the completed payload path, manifest, destination peer, and stable request UUID. The sender verifies the local file, then waits for an exact OFFER response, one ACK per chunk, and COMPLETE. No remote path, command, plugin, or configuration operation is represented by these message types. See [SNAPSHOTS.md](SNAPSHOTS.md) for the security and lifecycle boundary.
 
 
 ## Snapshot receiver handling
 
 Snapshot-transfer frames are dispatched only after an authenticated peer session is established. The receiver binds an OFFER to the authenticated peer ID and configured shared-world allowlist, then binds all subsequent chunks and FINISH to the exact active request and snapshot UUIDs. Snapshot frames have a separate bounded per-peer rate limiter.
 
-The receiver accepts only OFFER, CHUNK, and FINISH as inbound sender messages. ACCEPT, REJECT, CHUNK_ACK, and COMPLETE received in that direction are protocol violations. An offer that fails authorization is rejected with a fixed reason; malformed frames, identity mismatches, illegal state transitions, or mismatched request/snapshot IDs fail the session closed.
+The receiver accepts OFFER, CHUNK, and FINISH to stage an inbound transfer. The sender accepts only the response matching its current request, snapshot, and expected chunk index. An offer that fails authorization is rejected with a fixed reason; malformed frames, identity mismatches, illegal state transitions, or mismatched request/snapshot IDs fail the session closed.
 
 CHUNK_ACK is written only after the staged bytes have been forced to disk and the contiguous progress record has committed. Duplicate chunks below the committed index are acknowledged only when their bytes exactly match the staged content. FINISH produces COMPLETE only after exact byte length, expected chunk count, and SHA-256 verification. This completion signal is not a world-installation acknowledgement.
 
-The staging receiver uses a locally fixed directory and UUID-derived filenames. No protocol field can name a filesystem path or cause a remote file operation. The staging quota is 512 MiB per snapshot, four active transfers globally, one active transfer per peer, and 1 GiB total reserved storage. See [SNAPSHOTS.md](SNAPSHOTS.md) for restart recovery and retention behavior. The sender and snapshot installation are not yet implemented.
+The staging receiver uses a locally fixed directory and UUID-derived filenames. No protocol field can name a filesystem path or cause a remote file operation. The staging quota is 512 MiB per snapshot, four active transfers globally, one active transfer per peer, and 1 GiB total reserved storage. The sender streams one chunk at a time and can resume by replaying from chunk zero with the same request UUID; the receiver recognizes already durable identical chunks. See [SNAPSHOTS.md](SNAPSHOTS.md) for restart recovery and retention behavior. Snapshot production and live-world installation remain unimplemented.
 
 
 ## Snapshot payload byte format

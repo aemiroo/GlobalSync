@@ -1,6 +1,6 @@
 # Snapshot format, transfer, and consistency contract
 
-This document defines the metadata and receiver-side transfer contract for world-state snapshots. The manifest and strict protocol-v2 codec are implemented, and authenticated peers can now transfer a payload into isolated durable staging. Snapshot capture, outbound snapshot production, live-world installation, and post-install event reconciliation are not implemented.
+This document defines the metadata and transfer contract for world-state snapshots. The manifest, strict protocol-v2 codec, receiver-side durable staging, and stop-and-wait outbound sender are implemented. Snapshot capture/production and live-world installation are not implemented; the sender accepts a completed local payload and its manifest from a caller.
 
 ## Scope
 
@@ -63,14 +63,14 @@ Every message includes protocol version 2 and a canonical request UUID; transfer
 
 An offer must be bound to the authenticated TLS peer identity: `manifest.sourceServerId` must exactly equal the peer ID established by the pinned-certificate HELLO/READY handshake. Its world ID must be in the receiver's configured shared-world allowlist. A valid certificate alone does not authorize arbitrary worlds or a claimed third-party snapshot origin.
 
-The codec is a wire-format and validation foundation only. This milestone does not yet attach a transfer handler to peer sessions, write chunks to disk, resume interrupted transfers, or expose any remote filesystem operation. Until a later receiver-staging milestone wires the handler, these messages are not an enabled operational transfer feature. No message contains a filesystem path, command, class name, plugin identifier, or configuration mutation.
+Snapshot-transfer messages are wired to authenticated peer sessions. The receiver durably stages and verifies incoming bytes; the sender streams a completed local payload in one-chunk-at-a-time order and waits for the exact acknowledgement before advancing. The sender checks the payload is a regular non-symbolic-link file with the manifest's exact size and SHA-256, and applies the receiver's 512 MiB maximum. The request UUID is caller-supplied so a retry can replay from chunk zero against the receiver's durable prefix. No message contains a filesystem path, command, class name, plugin identifier, or configuration mutation.
 
 All JSON messages are canonical and reject unknown/missing fields, duplicate keys through canonical-form rejection, malformed UTF-8, invalid UUIDs, invalid enum values, invalid Base64, oversized frames, and out-of-range chunk indices. Chunk data is copied defensively by the decoded message model.
 
 
 ## Receiver-side durable staging
 
-The receiver handles snapshot frames only after the peer has completed the existing mutual-TLS, certificate-pinned HELLO/READY handshake. The offer's source ID is compared with that authenticated session identity, and its world ID must be present in the local shared-world allowlist. Messages are bound to the request and snapshot UUIDs held by the active session; an unbound, out-of-order, or unexpected sender-side response closes the session.
+Both peers handle snapshot frames only after the existing mutual-TLS, certificate-pinned HELLO/READY handshake. The receiver checks that the offered source ID matches the authenticated peer and that the world is configured locally. The sender can target only a currently connected, explicitly authorized peer and only a locally configured shared world. Messages are bound to the request and snapshot UUIDs held by the active session; unbound, out-of-order, or unexpected responses close the session.
 
 The staging store is separate from all live world directories:
 
@@ -79,12 +79,12 @@ The staging store is separate from all live world directories:
 - A transfer is limited to 512 MiB, four active transfers globally, one active transfer per peer, and 1 GiB of total reserved snapshot storage. These are local hard limits, not peer-controlled settings.
 - Chunks must arrive in exact index order and have the manifest-derived exact size. An identical duplicate chunk is acknowledged; a conflicting duplicate is rejected.
 - Each chunk is forced to the staging file before the SQLite progress record is committed. SQLite uses WAL with synchronous FULL. On restart, bytes beyond the committed contiguous prefix are truncated; a file shorter than its durable progress record fails closed.
-- An offer can resume only with the same authenticated peer, request UUID, snapshot UUID, and byte-identical manifest. The current ACCEPT message does not communicate a resume offset, so a future sender must replay from chunk zero; the receiver recognizes and acknowledges already durable identical chunks.
+- An offer can resume only with the same authenticated peer, request UUID, snapshot UUID, and byte-identical manifest. ACCEPT does not communicate a resume offset; the sender replays from chunk zero and the receiver recognizes and acknowledges already durable identical chunks.
 - FINISH is accepted only after the exact manifest length and chunk count arrive. The receiver streams SHA-256 over the staged file and marks it COMPLETE only after the digest matches.
 
 A successful `SNAPSHOT_COMPLETE` means **the payload is durably staged and its length and SHA-256 were verified**. It does not mean that the snapshot was installed, loaded, or applied to a world. Staged snapshots remain on disk; there is no automatic retention or pruning policy yet, and completed snapshots continue to count against the 1 GiB reservation limit. Operators should preserve the staging directory until a later installation/retention stage explicitly consumes it.
 
-The receiver does not unzip, deserialize Java objects, load classes, execute commands, alter configuration, or write into a live world. The payload remains opaque bytes in a UUID-named staging file. The outbound snapshot sender and live-world installation are separate follow-up milestones.
+The receiver does not unzip, deserialize Java objects, load classes, execute commands, alter configuration, or write into a live world. The payload remains opaque bytes in a UUID-named staging file. The sender is available through the plugin API, but no capture command or producer currently creates completed local payloads. Live-world installation remains a later milestone.
 
 
 ## PAPER_BLOCK_DATA_V1 payload framing

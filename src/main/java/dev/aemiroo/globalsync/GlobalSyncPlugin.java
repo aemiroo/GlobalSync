@@ -16,6 +16,7 @@ import dev.aemiroo.globalsync.replication.GapRecoveryProgress;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
+import dev.aemiroo.globalsync.replication.SnapshotManifest;
 import dev.aemiroo.globalsync.replication.WorldSequenceClock;
 import dev.aemiroo.globalsync.replication.SqliteEventJournal;
 import dev.aemiroo.globalsync.replication.SqliteReceivedEventStore;
@@ -38,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
@@ -364,6 +366,18 @@ public final class GlobalSyncPlugin extends JavaPlugin {
 
     public boolean isSharedWorld(String worldId) {
         return sharedWorlds != null && sharedWorlds.contains(worldId);
+    }
+
+    /**
+     * Sends a completed, locally verified snapshot payload to an authenticated
+     * configured peer. Snapshot capture and installation remain separate APIs.
+     */
+    public CompletableFuture<Void> sendSnapshot(
+            String peerServerId, SnapshotManifest manifest, UUID requestId, Path payloadFile) {
+        PeerConnectionManager manager = peerConnectionManager;
+        if (manager == null)
+            return CompletableFuture.failedFuture(new IOException("Peer networking is disabled"));
+        return manager.sendSnapshot(peerServerId, manifest, requestId, payloadFile);
     }
 
     private void restoreLocalWinnerIndex() throws SQLException {
