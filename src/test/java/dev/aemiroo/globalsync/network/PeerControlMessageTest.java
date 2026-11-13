@@ -16,6 +16,14 @@ class PeerControlMessageTest {
     }
 
     @Test
+    void doesNotMistakeLargeEventFramesForControlMessages() throws Exception {
+        String event = "{\"type\":\"EVENT\",\"padding\":\"" + "x".repeat(400) + "\"}";
+        byte[] payload = event.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(payload.length > 256);
+        assertFalse(PeerControlMessage.isControl(payload));
+    }
+
+    @Test
     void rejectsUnknownFieldsUnsupportedVersionsAndMalformedFrames() {
         assertThrows(java.io.IOException.class, () -> PeerControlMessage.decode(
                 ("{\"type\":\"PING\",\"protocolVersion\":2,\"nonce\":\""
