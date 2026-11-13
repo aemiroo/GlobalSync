@@ -33,12 +33,13 @@ public final class ReplicationMessageCodec {
     public static byte[] encodeEvent(ReplicationEnvelope event) {
         JsonObject json = new JsonObject();
         json.addProperty("type", "EVENT");
-        json.addProperty("protocolVersion", event.protocolVersion());
+        int wireVersion = event.worldSequence() > 0 ? 3 : 2;
+        json.addProperty("protocolVersion", wireVersion);
         json.addProperty("eventId", event.eventId().toString());
         json.addProperty("worldId", event.worldId());
         json.addProperty("originServerId", event.originServerId());
         json.addProperty("sequence", event.sequence());
-        json.addProperty("worldSequence", event.worldSequence());
+        if (wireVersion == 3) json.addProperty("worldSequence", event.worldSequence());
         json.addProperty("logicalClock", event.logicalClock());
         json.addProperty("createdAt", event.createdAt().toString());
         json.addProperty("eventType", event.eventType());
@@ -86,6 +87,8 @@ public final class ReplicationMessageCodec {
             throw new IOException("BLOCK_PLACE cannot result in minecraft:air");
         try {
             long worldSequence = version == 3 ? longInteger(json, "worldSequence") : 0L;
+            if (version == 3 && worldSequence < 1)
+                throw new IOException("World sequence must be positive for protocol version 3");
             return new ReplicationEnvelope(3, UUID.fromString(string(json, "eventId")), world, origin,
                     longInteger(json, "sequence"), worldSequence, checkedRemoteLogicalClock(json),
                     Instant.parse(string(json, "createdAt")), eventType,
