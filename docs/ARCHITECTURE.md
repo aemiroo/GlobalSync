@@ -32,7 +32,7 @@ This does not yet cover environmental simulation, block entities, inventories, r
 
 Bukkit/Paper world access must happen on the server's appropriate scheduler/thread. Network reads and writes must run off the main thread. Incoming messages are validated and durably recorded off-thread. No Bukkit world API is called by the network worker; world application is not implemented.
 
-Journal writes are submitted to a dedicated single-thread executor. Callers receive a CompletableFuture that completes after the SQLite append has committed. The executor preserves append order for submissions made through the plugin API.
+Journal writes are submitted to a dedicated single-thread executor. Callers receive a CompletableFuture that completes after the SQLite append has committed. The executor preserves append order for submissions made through the plugin API. Peer senders read committed entries from the journal and persist independent per-peer acknowledgement cursors in SQLite.
 
 ## Transport security and peer lifecycle
 
@@ -40,7 +40,7 @@ The transport now has an opt-in TLS listener and outbound dialer. TLS 1.3 and mu
 
 The listener and outbound connections use a bounded worker pool. Excess connections are rejected, handshakes have read timeouts, and shutdown closes active and pending sockets. A deterministic node-ID ordering chooses one dialer per peer pair to avoid simultaneous duplicate connections.
 
-After authentication, the peer worker accepts only version-1 `EVENT` frames for player block placements and breaks. It validates the claimed origin against the authenticated peer, checks the shared-world allowlist and exact payload schema, and writes the event to a separate SQLite inbox. The ACK is sent only after the FULL-synchronous transaction commits. The inbox deduplicates by event ID and origin sequence across restarts. There is still no outbound journal sender, per-peer replay cursor, retry loop, or Minecraft world application. `network.enabled` remains false by default.
+After authentication, the peer worker accepts only version-1 `EVENT` frames for player block placements and breaks. It validates the claimed origin against the authenticated peer, checks the shared-world allowlist and exact payload schema, and writes the event to a separate SQLite inbox. The ACK is sent only after the FULL-synchronous transaction commits. The inbox deduplicates by event ID and origin sequence across restarts. Each side also runs a bounded stop-and-wait sender over the same full-duplex connection. It sends the next local journal entry, waits for a matching event-ID ACK, and then commits that peer's local journal cursor. Cursor updates are checked against the exact next row and survive restart. ACK timeouts close the session; the deterministic dialer retries with bounded exponential backoff, and unacknowledged events replay safely through receiver-side deduplication. There is still no Minecraft world application. `network.enabled` remains false by default.
 
 ## Replication layers
 

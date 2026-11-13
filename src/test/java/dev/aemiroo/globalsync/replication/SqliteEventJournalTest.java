@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -61,6 +62,31 @@ class SqliteEventJournalTest {
         try (SqliteEventJournal journal = new SqliteEventJournal(temporaryDirectory.resolve("events.db"))) {
             assertThrows(IllegalArgumentException.class, () -> journal.readAfter(-1, 10));
             assertThrows(IllegalArgumentException.class, () -> journal.readAfter(0, 0));
+        }
+    }
+
+    @Test
+    void persistsPerPeerAcknowledgementCursorAndRejectsSkippedEntries() throws Exception {
+        Path database = temporaryDirectory.resolve("delivery/events.db");
+        ReplicationEnvelope first = event(UUID.randomUUID(), "asia", 1, "BLOCK_PLACE");
+        ReplicationEnvelope second = event(UUID.randomUUID(), "asia", 2, "BLOCK_BREAK");
+        try (SqliteEventJournal journal = new SqliteEventJournal(database)) {
+            long firstOffset = journal.append(first);
+            long secondOffset = journal.append(second);
+            assertEquals(0, journal.acknowledgedOffset("europe"));
+            assertThrows(SQLException.class,
+                    () -> journal.acknowledge("europe", new JournalEntry(secondOffset, second), 2));
+            journal.acknowledge("europe", new JournalEntry(firstOffset, first), 7);
+            assertEquals(firstOffset, journal.acknowledgedOffset("europe"));
+            assertEquals(7, journal.remoteReceiptOffset("europe"));
+            journal.acknowledge("europe", new JournalEntry(secondOffset, second), 8);
+            assertEquals(secondOffset, journal.acknowledgedOffset("europe"));
+            assertThrows(SQLException.class,
+                    () -> journal.acknowledge("europe", new JournalEntry(firstOffset, first), 7));
+        }
+        try (SqliteEventJournal recovered = new SqliteEventJournal(database)) {
+            assertEquals(2, recovered.acknowledgedOffset("europe"));
+            assertEquals(8, recovered.remoteReceiptOffset("europe"));
         }
     }
 

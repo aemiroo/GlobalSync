@@ -2,7 +2,7 @@
 
 ## Scope and security claims
 
-GlobalSync is experimental software. Peer networking is disabled by default. When explicitly enabled, this version accepts a narrowly allowlisted set of inbound block-edit events over authenticated TLS and durably acknowledges them. It does not send local events or apply remote world state.
+GlobalSync is experimental software. Peer networking is disabled by default. When explicitly enabled, this version exchanges a narrowly allowlisted set of block-edit events over authenticated TLS. Receivers durably acknowledge events; senders persist per-peer acknowledgement cursors. Received events are not applied to remote world state.
 
 No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to make unauthorized behavior difficult to introduce, constrain the impact of a compromised node, and make releases auditable. A clean build or a passing test suite is not proof that source code is benign.
 
@@ -25,19 +25,20 @@ No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to ma
 - The claimed event origin must equal the authenticated peer ID, and the world must be in the configured shared-world allowlist.
 - Inbound events are stored in a separate SQLite inbox with WAL and FULL synchronous commits. Event IDs and origin sequences are unique; exact retries are idempotent and conflicting reuse is rejected.
 - An ACK is generated only after the inbox transaction commits. It confirms durable receipt, not application to the Minecraft world.
+- Outbound delivery uses one in-flight event per peer, a bounded sender worker, and a durable per-peer cursor that advances only for the exact event acknowledged.
+- ACKs are matched to the outstanding event ID. A timeout or disconnect closes the session; reconnect replay resumes from the durable cursor and relies on receiver deduplication if the original ACK was lost.
 - TLS private keys and store passwords must remain outside source control. Supply passwords through the configured environment variables.
 - The plugin has no supported remote command or arbitrary code execution feature.
 
-## Required controls before outbound delivery and world application are enabled
+## Required controls before world application is enabled
 
-Do not implement or enable application-message exchange until all of these exist and are reviewed:
+Do not implement or enable remote world application until all of these exist and are reviewed:
 
-1. Outbound journal replay with per-peer durable acknowledgement cursors, bounded retries, reconnect behavior, and replay after restart.
-2. Per-peer rate limits, connection limits, read/write timeouts, bounded queues, and backpressure.
-3. Integration tests that exercise the full TLS EVENT/ACK exchange, replay after disconnect, duplicate delivery, and crash/restart boundaries.
-4. A safe application layer: received data must be marshalled onto the correct Paper thread and must never be applied without explicit world/event authorization and conflict handling.
-5. A documented certificate rotation and revocation procedure.
-6. Explicit authorization for each shared world and each event type; a valid TLS peer must not gain unrestricted world-write authority.
+1. Per-peer rate limits and operational backpressure beyond the current one-event in-flight bound.
+2. Expanded fault-injection tests for lost ACKs, process crashes at each persistence boundary, prolonged partitions, and repeated reconnects.
+3. A safe application layer: received data must be marshalled onto the correct Paper thread and must never be applied without explicit world/event authorization and conflict handling.
+4. A documented certificate rotation and revocation procedure.
+5. Explicit authorization for each shared world and each event type; a valid TLS peer must not gain unrestricted world-write authority.
 
 Never add remote console, command dispatch, class loading, scripting, plugin installation, arbitrary file access, or configuration mutation to the replication protocol.
 

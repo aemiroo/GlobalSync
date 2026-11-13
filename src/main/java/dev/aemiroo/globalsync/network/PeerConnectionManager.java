@@ -1,5 +1,8 @@
 package dev.aemiroo.globalsync.network;
 
+import dev.aemiroo.globalsync.replication.JournalEntry;
+import dev.aemiroo.globalsync.replication.SqliteEventJournal;
+
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
@@ -8,17 +11,26 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.sql.SQLException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
-/** Owns bounded, authenticated peer channels and the allowlisted receive loop. */
+/**
+ * Owns authenticated full-duplex peer sessions. One reader handles inbound
+ * EVENT/ACK frames; a bounded sender performs stop-and-wait journal delivery.
+ */
 public final class PeerConnectionManager implements AutoCloseable {
     private final SSLContext tlsContext;
     private final String localServerId;
@@ -26,10 +38,16 @@ public final class PeerConnectionManager implements AutoCloseable {
     private final int maxFrameBytes;
     private final int handshakeTimeoutMillis;
     private final int maxConnections;
+    private final int acknowledgementTimeoutMillis;
+    private final int deliveryPollMillis;
+    private final int reconnectMinMillis;
+    private final int reconnectMaxMillis;
     private final Logger logger;
     private final ReplicationMessageHandler messageHandler;
+    private final SqliteEventJournal eventJournal;
     private final ThreadPoolExecutor connectionWorkers;
-    private final Map<String, SSLSocket> connections = new ConcurrentHashMap<>();
+    private final ThreadPoolExecutor deliveryWorkers;
+    private final Map<String, PeerSession> connections = new ConcurrentHashMap<>();
     private final Set<Socket> pendingSockets = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile SSLServerSocket listener;
@@ -39,31 +57,60 @@ public final class PeerConnectionManager implements AutoCloseable {
             PeerAuthorizationRegistry authorization, int maxFrameBytes, int maxConnections,
             int handshakeTimeoutMillis, Logger logger) {
         this(tlsContext, localServerId, authorization, maxFrameBytes, maxConnections,
-                handshakeTimeoutMillis, logger, null);
+                handshakeTimeoutMillis, logger, null, null, 10_000, 250, 1_000, 30_000);
     }
 
     public PeerConnectionManager(SSLContext tlsContext, String localServerId,
             PeerAuthorizationRegistry authorization, int maxFrameBytes, int maxConnections,
             int handshakeTimeoutMillis, Logger logger, ReplicationMessageHandler messageHandler) {
+        this(tlsContext, localServerId, authorization, maxFrameBytes, maxConnections,
+                handshakeTimeoutMillis, logger, messageHandler, null, 10_000, 250, 1_000, 30_000);
+    }
+
+    public PeerConnectionManager(SSLContext tlsContext, String localServerId,
+            PeerAuthorizationRegistry authorization, int maxFrameBytes, int maxConnections,
+            int handshakeTimeoutMillis, Logger logger, ReplicationMessageHandler messageHandler,
+            SqliteEventJournal eventJournal, int acknowledgementTimeoutMillis,
+            int deliveryPollMillis, int reconnectMinMillis, int reconnectMaxMillis) {
         this.tlsContext = Objects.requireNonNull(tlsContext, "tlsContext");
         this.localServerId = Objects.requireNonNull(localServerId, "localServerId");
         this.authorization = Objects.requireNonNull(authorization, "authorization");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.messageHandler = messageHandler;
+        this.eventJournal = eventJournal;
         if (!localServerId.matches("[A-Za-z0-9._-]{1,64}"))
             throw new IllegalArgumentException("Invalid local server ID");
         if (maxFrameBytes < 4_096 || maxFrameBytes > FrameCodec.DEFAULT_MAX_FRAME_BYTES)
             throw new IllegalArgumentException("maxFrameBytes must be between 4096 and 1048576");
         if (maxConnections < 1 || maxConnections > 64)
             throw new IllegalArgumentException("maxConnections must be between 1 and 64");
+        if (authorization.peers().size() > maxConnections)
+            throw new IllegalArgumentException("Configured peer count cannot exceed maxConnections");
         if (handshakeTimeoutMillis < 1_000 || handshakeTimeoutMillis > 30_000)
             throw new IllegalArgumentException("handshakeTimeoutMillis must be between 1000 and 30000");
+        if (acknowledgementTimeoutMillis < 1_000 || acknowledgementTimeoutMillis > 120_000)
+            throw new IllegalArgumentException("acknowledgementTimeoutMillis must be between 1000 and 120000");
+        if (deliveryPollMillis < 50 || deliveryPollMillis > 10_000)
+            throw new IllegalArgumentException("deliveryPollMillis must be between 50 and 10000");
+        if (reconnectMinMillis < 250 || reconnectMaxMillis < reconnectMinMillis || reconnectMaxMillis > 300_000)
+            throw new IllegalArgumentException("Invalid reconnect backoff bounds");
+        if ((messageHandler == null) != (eventJournal == null))
+            throw new IllegalArgumentException("Inbound handler and outgoing journal must be configured together");
         this.maxFrameBytes = maxFrameBytes;
         this.maxConnections = maxConnections;
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
-        this.connectionWorkers = new ThreadPoolExecutor(maxConnections, maxConnections, 0L,
-                TimeUnit.MILLISECONDS, new SynchronousQueue<>(), task -> {
-                    Thread thread = new Thread(task, "GlobalSync-Peer-Worker");
+        this.acknowledgementTimeoutMillis = acknowledgementTimeoutMillis;
+        this.deliveryPollMillis = deliveryPollMillis;
+        this.reconnectMinMillis = reconnectMinMillis;
+        this.reconnectMaxMillis = reconnectMaxMillis;
+        this.connectionWorkers = workerPool(maxConnections, "GlobalSync-Peer-Worker");
+        this.deliveryWorkers = workerPool(maxConnections, "GlobalSync-Delivery-Worker");
+    }
+
+    private static ThreadPoolExecutor workerPool(int size, String name) {
+        return new ThreadPoolExecutor(size, size, 0L, TimeUnit.MILLISECONDS,
+                new SynchronousQueue<>(), task -> {
+                    Thread thread = new Thread(task, name);
                     thread.setDaemon(true);
                     return thread;
                 }, new ThreadPoolExecutor.AbortPolicy());
@@ -91,22 +138,22 @@ public final class PeerConnectionManager implements AutoCloseable {
         }
     }
 
-    /** Initiates outbound connections without blocking the Paper server thread. */
+    /** Starts one bounded reconnect loop for each deterministically selected dialer peer. */
     public void connectConfiguredPeers() {
         if (!running.get()) throw new IllegalStateException("Peer listener must be started before dialing peers");
         for (PeerEndpoint endpoint : authorization.peers()) {
             if (localServerId.compareTo(endpoint.serverId()) > 0) continue;
             try {
-                connectionWorkers.execute(() -> connectAndHold(endpoint));
+                connectionWorkers.execute(() -> connectWithRetry(endpoint));
             } catch (java.util.concurrent.RejectedExecutionException exception) {
-                logger.warning("Peer connection capacity is full; skipped outbound peer " + endpoint.serverId());
+                logger.warning("Peer connection capacity is full; could not schedule " + endpoint.serverId());
             }
         }
     }
 
     public boolean isConnected(String peerServerId) {
-        SSLSocket socket = connections.get(peerServerId);
-        return socket != null && socket.isConnected() && !socket.isClosed();
+        PeerSession session = connections.get(peerServerId);
+        return session != null && session.isOpen();
     }
     public int connectedPeerCount() { return connections.size(); }
 
@@ -123,6 +170,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             }
         }
     }
+
     private void submitAccepted(SSLSocket socket) {
         try { connectionWorkers.execute(() -> authenticateAndHold(socket)); }
         catch (java.util.concurrent.RejectedExecutionException exception) {
@@ -131,75 +179,195 @@ public final class PeerConnectionManager implements AutoCloseable {
             logger.warning("Rejected inbound peer connection because the worker limit was reached.");
         }
     }
-    private void connectAndHold(PeerEndpoint endpoint) {
-        if (connections.containsKey(endpoint.serverId()) || !running.get()) return;
-        Socket plainSocket = new Socket();
-        pendingSockets.add(plainSocket);
-        SSLSocket tlsSocket = null;
-        try {
-            plainSocket.connect(new InetSocketAddress(endpoint.host(), endpoint.port()), handshakeTimeoutMillis);
-            tlsSocket = (SSLSocket) tlsContext.getSocketFactory()
-                    .createSocket(plainSocket, endpoint.host(), endpoint.port(), true);
-            pendingSockets.remove(plainSocket);
-            pendingSockets.add(tlsSocket);
-            TlsContextFactory.configureClientSocket(tlsSocket);
-            tlsSocket.setSoTimeout(handshakeTimeoutMillis);
-            authenticateAndHold(tlsSocket);
-        } catch (IOException | RuntimeException exception) {
-            closeQuietly(tlsSocket);
-            logger.warning("Could not authenticate peer " + endpoint.serverId() + ": "
-                    + exception.getClass().getSimpleName());
-        } finally {
-            pendingSockets.remove(plainSocket);
-            closeQuietly(plainSocket);
+
+    private void connectWithRetry(PeerEndpoint endpoint) {
+        long backoff = reconnectMinMillis;
+        while (running.get()) {
+            if (connections.containsKey(endpoint.serverId())) {
+                sleep(deliveryPollMillis);
+                continue;
+            }
+            Socket plainSocket = new Socket();
+            pendingSockets.add(plainSocket);
+            SSLSocket tlsSocket = null;
+            long connectionStarted = System.nanoTime();
+            try {
+                plainSocket.connect(new InetSocketAddress(endpoint.host(), endpoint.port()), handshakeTimeoutMillis);
+                tlsSocket = (SSLSocket) tlsContext.getSocketFactory()
+                        .createSocket(plainSocket, endpoint.host(), endpoint.port(), true);
+                pendingSockets.remove(plainSocket);
+                pendingSockets.add(tlsSocket);
+                TlsContextFactory.configureClientSocket(tlsSocket);
+                tlsSocket.setSoTimeout(handshakeTimeoutMillis);
+                authenticateAndHold(tlsSocket);
+                if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - connectionStarted) >= 30_000) {
+                    backoff = reconnectMinMillis;
+                }
+            } catch (IOException | RuntimeException exception) {
+                closeQuietly(tlsSocket);
+                if (running.get()) logger.warning("Peer " + endpoint.serverId() + " unavailable: "
+                        + exception.getClass().getSimpleName());
+            } finally {
+                pendingSockets.remove(plainSocket);
+                closeQuietly(plainSocket);
+            }
+            if (!running.get()) break;
+            sleep(backoff);
+            backoff = Math.min(reconnectMaxMillis, backoff >= reconnectMaxMillis / 2
+                    ? reconnectMaxMillis : backoff * 2);
         }
     }
 
     private void authenticateAndHold(SSLSocket socket) {
         String peerId = null;
+        PeerSession session = null;
         try {
             socket.setSoTimeout(handshakeTimeoutMillis);
             peerId = PeerHandshake.authenticate(socket, localServerId, authorization, maxFrameBytes);
-            SSLSocket previous = connections.putIfAbsent(peerId, socket);
+            session = new PeerSession(peerId, socket, maxFrameBytes);
+            PeerSession previous = connections.putIfAbsent(peerId, session);
             if (previous != null) throw new IOException("A connection for this peer is already active");
             socket.setSoTimeout(0);
-            logger.info("Authenticated peer connection established: " + peerId);
-            if (messageHandler == null) {
-                // Compatibility mode for transport-only tests/consumers.
-                if (socket.getInputStream().read() != -1)
+            logger.info("Authenticated peer session established: " + peerId);
+
+            if (messageHandler != null) {
+                PeerSession active = session;
+                deliveryWorkers.execute(() -> deliverJournal(active));
+            }
+
+            while (running.get() && session.isOpen()) {
+                byte[] frame = FrameCodec.readFrame(socket.getInputStream(), maxFrameBytes);
+                if (messageHandler == null) {
                     throw new IOException("Application messages are not enabled");
-            } else {
-                while (running.get() && !socket.isClosed()) {
-                    byte[] request = FrameCodec.readFrame(socket.getInputStream(), maxFrameBytes);
-                    byte[] acknowledgement = messageHandler.handle(request, peerId);
-                    FrameCodec.writeFrame(socket.getOutputStream(), acknowledgement, maxFrameBytes);
+                }
+                if (ReplicationMessageCodec.isAcknowledgement(frame)) {
+                    PendingDelivery pending = session.pending.get();
+                    if (pending == null) throw new IOException("Unsolicited replication acknowledgement");
+                    ReplicationAcknowledgement acknowledgement =
+                            ReplicationMessageCodec.decodeAck(frame, pending.entry.envelope().eventId());
+                    pending.future.complete(acknowledgement);
+                } else {
+                    byte[] acknowledgement = messageHandler.handle(frame, peerId);
+                    session.write(acknowledgement);
                 }
             }
         } catch (IOException | RuntimeException exception) {
-            if (peerId != null) logger.info("Peer connection closed: " + peerId);
-            else logger.warning("Rejected unauthenticated peer connection: " + exception.getClass().getSimpleName());
+            if (peerId != null && running.get())
+                logger.info("Peer session closed: " + peerId + " (" + exception.getClass().getSimpleName() + ")");
+            else if (peerId == null)
+                logger.warning("Rejected unauthenticated peer connection: " + exception.getClass().getSimpleName());
         } finally {
-            if (peerId != null) connections.remove(peerId, socket);
+            if (session != null) {
+                session.close();
+                connections.remove(peerId, session);
+            }
             pendingSockets.remove(socket);
             closeQuietly(socket);
         }
     }
 
+    private void deliverJournal(PeerSession session) {
+        while (running.get() && session.isOpen()) {
+            try {
+                long cursor = eventJournal.acknowledgedOffset(session.peerId);
+                var entries = eventJournal.readAfter(cursor, 1);
+                if (entries.isEmpty()) {
+                    sleep(deliveryPollMillis);
+                    continue;
+                }
+                JournalEntry entry = entries.get(0);
+                PendingDelivery pending = new PendingDelivery(entry);
+                if (!session.pending.compareAndSet(null, pending))
+                    throw new IOException("A delivery is already awaiting acknowledgement");
+                session.write(ReplicationMessageCodec.encodeEvent(entry.envelope()));
+                ReplicationAcknowledgement acknowledgement;
+                try {
+                    acknowledgement = pending.future.get(acknowledgementTimeoutMillis, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException exception) {
+                    throw new IOException("Peer acknowledgement timed out", exception);
+                } catch (ExecutionException exception) {
+                    throw new IOException("Peer session ended before acknowledgement", exception.getCause());
+                } finally {
+                    session.pending.compareAndSet(pending, null);
+                }
+                eventJournal.acknowledge(session.peerId, entry, acknowledgement.receiverReceiptOffset());
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                session.close();
+                return;
+            } catch (IOException | SQLException | RuntimeException exception) {
+                if (running.get()) logger.warning("Delivery to peer " + session.peerId + " paused: "
+                        + exception.getClass().getSimpleName());
+                session.close();
+                return;
+            }
+        }
+    }
+
+    private static void sleep(long millis) {
+        try { Thread.sleep(millis); }
+        catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+    }
+
     @Override public synchronized void close() {
-        if (!running.getAndSet(false)) { connectionWorkers.shutdownNow(); return; }
+        if (!running.getAndSet(false)) {
+            connectionWorkers.shutdownNow();
+            deliveryWorkers.shutdownNow();
+            return;
+        }
         closeQuietly(listener);
         listener = null;
         for (Socket socket : pendingSockets) closeQuietly(socket);
         pendingSockets.clear();
+        for (PeerSession session : connections.values()) session.close();
         connections.clear();
         connectionWorkers.shutdownNow();
-        try { connectionWorkers.awaitTermination(5, TimeUnit.SECONDS); }
-        catch (InterruptedException exception) { Thread.currentThread().interrupt(); }
+        deliveryWorkers.shutdownNow();
+        try {
+            connectionWorkers.awaitTermination(5, TimeUnit.SECONDS);
+            deliveryWorkers.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
         Thread thread = acceptThread;
         if (thread != null) thread.interrupt();
     }
+
     private static void closeQuietly(Closeable closeable) {
         if (closeable == null) return;
         try { closeable.close(); } catch (IOException ignored) { /* best-effort shutdown */ }
+    }
+
+    private static final class PendingDelivery {
+        private final JournalEntry entry;
+        private final CompletableFuture<ReplicationAcknowledgement> future = new CompletableFuture<>();
+        private PendingDelivery(JournalEntry entry) { this.entry = entry; }
+    }
+
+    private static final class PeerSession {
+        private final String peerId;
+        private final SSLSocket socket;
+        private final int maxFrameBytes;
+        private final AtomicBoolean open = new AtomicBoolean(true);
+        private final AtomicReference<PendingDelivery> pending = new AtomicReference<>();
+        private PeerSession(String peerId, SSLSocket socket, int maxFrameBytes) {
+            this.peerId = peerId;
+            this.socket = socket;
+            this.maxFrameBytes = maxFrameBytes;
+        }
+        private boolean isOpen() { return open.get() && !socket.isClosed(); }
+        private void write(byte[] frame) throws IOException {
+            synchronized (socket) {
+                if (!isOpen()) throw new IOException("Peer session is closed");
+                FrameCodec.writeFrame(socket.getOutputStream(), frame, maxFrameBytes);
+            }
+        }
+        private void close() {
+            if (open.getAndSet(false)) {
+                PendingDelivery current = pending.getAndSet(null);
+                if (current != null) current.future.completeExceptionally(new IOException("Peer disconnected"));
+                closeQuietly(socket);
+            }
+        }
     }
 }

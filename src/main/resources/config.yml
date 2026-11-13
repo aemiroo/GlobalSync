@@ -3,8 +3,8 @@ server-id: "region-asia"
 shared-worlds:
   - "world"
 
-# Player block edits are written to the local journal. They are not sent to
-# other regions until a versioned replication-message protocol is implemented.
+# Successful player block edits are written to the local journal. When peer
+# networking is enabled, they are delivered and durably acknowledged by peers.
 capture:
   player-block-changes: true
 
@@ -17,6 +17,10 @@ network:
   max-frame-bytes: 1048576
   max-connections: 16
   handshake-timeout-ms: 5000
+  acknowledgement-timeout-ms: 10000
+  delivery-poll-ms: 250
+  reconnect-min-ms: 1000
+  reconnect-max-ms: 30000
   tls:
     identity-store: "tls/node.p12"
     identity-store-password-env: "GLOBALSYNC_KEYSTORE_PASSWORD"

@@ -61,6 +61,15 @@ public final class SqliteEventJournal implements AutoCloseable {
                     CREATE INDEX IF NOT EXISTS idx_events_world_offset
                     ON events(world_id, journal_offset)
                     """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS peer_delivery (
+                        peer_server_id TEXT PRIMARY KEY,
+                        acknowledged_offset INTEGER NOT NULL DEFAULT 0 CHECK (acknowledged_offset >= 0),
+                        last_event_id TEXT,
+                        remote_receipt_offset INTEGER NOT NULL DEFAULT 0 CHECK (remote_receipt_offset >= 0),
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """);
         } catch (SQLException exception) {
             connection.close();
             throw exception;
@@ -127,6 +136,95 @@ public final class SqliteEventJournal implements AutoCloseable {
                     entries.add(readEntry(result));
                 }
                 return List.copyOf(entries);
+            }
+        }
+    }
+
+    /** Returns this peer's durable local-journal acknowledgement cursor. */
+    public synchronized long acknowledgedOffset(String peerServerId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT acknowledged_offset FROM peer_delivery WHERE peer_server_id = ?")) {
+            query.setString(1, peerServerId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0L;
+            }
+        }
+    }
+
+    /**
+     * Advances a peer cursor only for the exact next local journal entry.
+     * The remote receipt offset is diagnostic metadata; it is never used as a
+     * cursor in this node's journal.
+     */
+    public synchronized void acknowledge(String peerServerId, JournalEntry entry,
+                                         long remoteReceiptOffset) throws SQLException {
+        if (peerServerId == null || !peerServerId.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IllegalArgumentException("Invalid peer server ID");
+        }
+        if (remoteReceiptOffset < 1) throw new IllegalArgumentException("remoteReceiptOffset must be positive");
+
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT event_id FROM events WHERE journal_offset = ?")) {
+            query.setLong(1, entry.offset());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next() || !entry.envelope().eventId().toString().equals(result.getString(1))) {
+                    throw new SQLException("Acknowledgement does not match a local journal entry");
+                }
+            }
+        }
+
+        long current = acknowledgedOffset(peerServerId);
+        if (entry.offset() < current) throw new SQLException("Peer acknowledgement cursor cannot move backwards");
+        if (entry.offset() == current) {
+            try (PreparedStatement query = connection.prepareStatement(
+                    "SELECT last_event_id FROM peer_delivery WHERE peer_server_id = ?")) {
+                query.setString(1, peerServerId);
+                try (ResultSet result = query.executeQuery()) {
+                    if (result.next() && entry.envelope().eventId().toString().equals(result.getString(1))) return;
+                }
+            }
+            throw new SQLException("Acknowledgement conflicts with the persisted peer cursor");
+        }
+
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT MIN(journal_offset) FROM events WHERE journal_offset > ?")) {
+            query.setLong(1, current);
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next() || result.getLong(1) != entry.offset()) {
+                    throw new SQLException("Peer acknowledgement would skip an unacknowledged journal entry");
+                }
+            }
+        }
+
+        long previousRemoteReceipt = remoteReceiptOffset(peerServerId);
+        if (remoteReceiptOffset <= previousRemoteReceipt) {
+            throw new SQLException("Receiver receipt offset did not advance");
+        }
+
+        try (PreparedStatement update = connection.prepareStatement("""
+                INSERT INTO peer_delivery
+                    (peer_server_id, acknowledged_offset, last_event_id, remote_receipt_offset, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(peer_server_id) DO UPDATE SET
+                    acknowledged_offset = excluded.acknowledged_offset,
+                    last_event_id = excluded.last_event_id,
+                    remote_receipt_offset = excluded.remote_receipt_offset,
+                    updated_at = CURRENT_TIMESTAMP
+                """)) {
+            update.setString(1, peerServerId);
+            update.setLong(2, entry.offset());
+            update.setString(3, entry.envelope().eventId().toString());
+            update.setLong(4, remoteReceiptOffset);
+            update.executeUpdate();
+        }
+    }
+
+    public synchronized long remoteReceiptOffset(String peerServerId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT remote_receipt_offset FROM peer_delivery WHERE peer_server_id = ?")) {
+            query.setString(1, peerServerId);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0L;
             }
         }
     }

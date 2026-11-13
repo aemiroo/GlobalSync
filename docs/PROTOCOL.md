@@ -45,7 +45,7 @@ A journal offset belongs to one database. It is not comparable across regions an
 
 ## Authenticated peer connection
 
-After the authenticated HELLO/READY handshake, the connection can receive version-1 EVENT frames. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the SQLite transaction commits. The sender/replay path is not implemented yet.
+After the authenticated HELLO/READY handshake, the connection can receive version-1 EVENT frames. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the SQLite transaction commits. The sender reads the local journal in offset order, sends one event per peer at a time, and advances its durable per-peer cursor only after a matching ACK is received. The ACK's `journalOffset` is the receiver's inbox offset; the sender separately persists the corresponding local journal offset.
 
 - TLS 1.3 is required; the server requires a client certificate.
 - The TLS trust store validates the certificate chain. After the TLS handshake, the remote node must also present a leaf certificate whose SHA-256 fingerprint matches the configured fingerprint for its claimed server ID.
@@ -58,15 +58,19 @@ After the authenticated HELLO/READY handshake, the connection can receive versio
 - The receiver binds `originServerId` to the authenticated TLS peer ID and checks the world against `shared-worlds`.
 - The receiver inbox is stored separately at `journal/received.db` with WAL mode and FULL synchronous commits. Event ID and `(origin node, origin sequence)` are unique keys. Exact retries return the original inbox offset; conflicting reuse is rejected.
 - ACK messages contain only the protocol version, event ID, and receiver-local durable inbox offset. They are not global offsets and do not imply that the event was applied to the Minecraft world.
+- Each node independently sends its own journal over the same full-duplex TLS connection. A single reader dispatches EVENT and ACK frames; writes are serialized.
+- Delivery is stop-and-wait: at most one event per peer is awaiting acknowledgement. This intentionally bounds in-flight memory and preserves journal order.
+- The sender persists a per-peer cursor in the local `events.db` database. It advances only for the exact next local journal row and only after an ACK with the expected event ID. The receiver's inbox offset is stored as diagnostic metadata, never as the sender's cursor.
+- If an ACK times out or the connection drops, the session closes and the deterministic dialer reconnects with bounded exponential backoff. The sender resumes from its persisted cursor; an event committed by the receiver but whose ACK was lost is replayed and deduplicated before the receiver ACKs it again.
 - Other application message types, unknown fields, malformed values, unsupported versions, and unsupported event types are rejected.
 
 Configure each remote peer under `network.peers.<server-id>` with `host`, `port`, and the SHA-256 fingerprint of its leaf certificate. The host must match a DNS name or IP address in the peer certificate's subject alternative name. Each node must also have its own PKCS12 identity store and a trust store containing the certificates or issuing CA certificates it is configured to trust.
 
-The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables inbound durable event receipt. It does not send local journal entries or apply received events to the Minecraft world. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
+The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables bidirectional durable event delivery. Received events are not applied to the Minecraft world. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
 
 ## Delivery requirements
 
-The complete transport still needs outbound journal delivery, per-peer acknowledgement tracking, retry/reconnect, durable replay, rate limits, and backpressure. The current inbound path provides authenticated peer identity, bounded frames, schema allowlisting, durable deduplication, and commit-before-ACK. It must not trust a peer merely because it can reach the TCP port.
+Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Remaining transport work includes explicit rate limiting, operational metrics, and broader fault-injection coverage. The receiver still only stores events; it does not apply world changes. It must not trust a peer merely because it can reach the TCP port.
 
 Receivers acknowledge only after the event is durably accepted. Shared secrets must never be sent in plaintext. TLS with mutual authentication and explicit peer authorization is the selected baseline.
 
@@ -78,4 +82,4 @@ Receivers acknowledge only after the event is durably accepted. Shared secrets m
 - Replaying an already committed event must not apply it twice.
 - Receiver-side deduplication must survive process restarts. The inbound SQLite inbox currently enforces this for received block-edit events.
 
-The local SQLite journal is the durable outgoing history for this node. The in-memory EventDeduplicator remains only a bounded optimization and is not a substitute for durable receiver-side idempotency.
+The local SQLite journal is the durable outgoing history for this node. Per-peer acknowledgement cursors are stored in the same database and survive restart. The in-memory EventDeduplicator remains only a bounded optimization and is not a substitute for durable receiver-side idempotency.

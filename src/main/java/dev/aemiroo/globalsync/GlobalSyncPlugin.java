@@ -114,7 +114,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         if (peerConnectionManager == null) {
             getLogger().info("Peer networking is disabled.");
         } else {
-            getLogger().warning("Authenticated peers can submit allowlisted block events for durable receipt; outbound delivery and world application are not implemented.");
+            getLogger().info("Authenticated peers are connected; outbound journal delivery and durable inbound receipt are active. World application remains disabled.");
         }
     }
 
@@ -226,7 +226,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         sender.sendMessage("§7Peer transport: §f" + (peerConnectionManager == null
                 ? "disabled" : peerConnectionManager.connectedPeerCount() + " authenticated peer(s)"));
         sender.sendMessage("§7Replication: §e" + (peerConnectionManager == null
-                ? "journal capture only" : "durable inbound event receipt enabled; outbound delivery and world application unavailable"));
+                ? "journal capture only" : "bidirectional durable event delivery enabled; world application unavailable"));
         return true;
     }
 
@@ -299,6 +299,10 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         int maxFrameBytes = network.getInt("max-frame-bytes", 1_048_576);
         int maxConnections = network.getInt("max-connections", 16);
         int handshakeTimeoutMillis = network.getInt("handshake-timeout-ms", 5_000);
+        int acknowledgementTimeoutMillis = network.getInt("acknowledgement-timeout-ms", 10_000);
+        int deliveryPollMillis = network.getInt("delivery-poll-ms", 250);
+        int reconnectMinMillis = network.getInt("reconnect-min-ms", 1_000);
+        int reconnectMaxMillis = network.getInt("reconnect-max-ms", 30_000);
         PeerAuthorizationRegistry authorization = new PeerAuthorizationRegistry(peers);
         peerConnectionManager = new PeerConnectionManager(
                 tlsContext,
@@ -308,7 +312,12 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 maxConnections,
                 handshakeTimeoutMillis,
                 getLogger(),
-                new ReplicationMessageHandler(receivedEventStore, Set.copyOf(sharedWorlds))
+                new ReplicationMessageHandler(receivedEventStore, Set.copyOf(sharedWorlds)),
+                eventJournal,
+                acknowledgementTimeoutMillis,
+                deliveryPollMillis,
+                reconnectMinMillis,
+                reconnectMaxMillis
         );
         InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
         int bindPort = network.getInt("bind-port", 28_120);
