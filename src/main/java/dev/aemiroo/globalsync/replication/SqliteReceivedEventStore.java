@@ -14,6 +14,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -62,6 +63,31 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                     CREATE UNIQUE INDEX IF NOT EXISTS received_world_origin_sequence
                     ON received_events(world_id, origin_server_id, world_sequence)
                     WHERE world_sequence > 0
+                    """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS applied_block_events (
+                        event_id TEXT PRIMARY KEY,
+                        origin_server_id TEXT NOT NULL,
+                        world_sequence INTEGER NOT NULL CHECK (world_sequence > 0),
+                        logical_clock INTEGER NOT NULL CHECK (logical_clock > 0),
+                        world_id TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        UNIQUE (world_id, origin_server_id, world_sequence)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE INDEX IF NOT EXISTS applied_block_events_world_order
+                    ON applied_block_events(world_id, logical_clock, origin_server_id, world_sequence)
+                    """);
+            // Preserve historical effects that are still marked APPLIED. Events
+            // superseded before this migration cannot be reconstructed, so the
+            // resulting snapshot coverage remains deliberately conservative.
+            statement.execute("""
+                    INSERT OR IGNORE INTO applied_block_events
+                        (event_id, origin_server_id, world_sequence, logical_clock, world_id, payload_json)
+                    SELECT event_id, origin_server_id, world_sequence, logical_clock, world_id, payload_json
+                    FROM received_events
+                    WHERE status = 'APPLIED' AND world_sequence > 0
                     """);
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS block_winners (
@@ -306,13 +332,80 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
             }
         }
         if (!worldMutation.getAsBoolean()) return false;
-        try (PreparedStatement update = connection.prepareStatement(
-                "UPDATE received_events SET status = 'APPLIED' WHERE event_id = ? AND status = 'PENDING'")) {
-            update.setString(1, eventId.toString());
-            return update.executeUpdate() == 1;
+
+        // Commit the applied status and its immutable reconciliation record as
+        // one transaction. If persistence fails after the world mutation, the
+        // event stays pending; retry observes the resulting block value and
+        // records the effect before claiming it applied.
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement history = connection.prepareStatement("""
+                    INSERT OR IGNORE INTO applied_block_events
+                        (event_id, origin_server_id, world_sequence, logical_clock, world_id, payload_json)
+                    SELECT event_id, origin_server_id, world_sequence, logical_clock, world_id, payload_json
+                    FROM received_events
+                    WHERE event_id = ? AND world_sequence > 0
+                    """)) {
+                history.setString(1, eventId.toString());
+                history.executeUpdate();
+            }
+            int updated;
+            try (PreparedStatement update = connection.prepareStatement(
+                    "UPDATE received_events SET status = 'APPLIED' WHERE event_id = ? AND status = 'PENDING'")) {
+                update.setString(1, eventId.toString());
+                updated = update.executeUpdate();
+            }
+            connection.commit();
+            return updated == 1;
+        } catch (SQLException | RuntimeException exception) {
+            try { connection.rollback(); } catch (SQLException rollbackFailure) {
+                exception.addSuppressed(rollbackFailure);
+            }
+            throw exception;
+        } finally {
+            try { connection.setAutoCommit(true); } catch (SQLException ignored) { }
         }
     }
 
+
+    /**
+     * Returns durable block effects successfully applied after a snapshot's
+     * conservative per-origin boundary. Records are retained even if a later
+     * event supersedes their inbox status.
+     */
+    public synchronized List<ReplicationEnvelope> appliedMutationsAfter(
+            String worldId, Map<String, Long> appliedThrough) throws SQLException {
+        if (worldId == null || worldId.isBlank()) throw new IllegalArgumentException("worldId is required");
+        if (appliedThrough == null || appliedThrough.size() > SnapshotManifest.MAX_ORIGINS)
+            throw new IllegalArgumentException("Invalid snapshot applied-through vector");
+        appliedThrough.forEach((origin, sequence) -> {
+            if (origin == null || origin.isBlank() || sequence == null || sequence < 0)
+                throw new IllegalArgumentException("Invalid snapshot applied-through entry");
+        });
+
+        List<ReplicationEnvelope> events = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT payload_json, origin_server_id, world_sequence
+                FROM applied_block_events
+                WHERE world_id = ?
+                ORDER BY logical_clock ASC, origin_server_id ASC, world_sequence ASC
+                """)) {
+            query.setString(1, worldId);
+            try (ResultSet rows = query.executeQuery()) {
+                while (rows.next()) {
+                    String origin = rows.getString("origin_server_id");
+                    long worldSequence = rows.getLong("world_sequence");
+                    if (worldSequence <= appliedThrough.getOrDefault(origin, 0L)) continue;
+                    events.add(ReplicationMessageCodec.decodeEvent(
+                            rows.getString("payload_json").getBytes(StandardCharsets.UTF_8),
+                            origin, Set.of(worldId)));
+                }
+            }
+        } catch (java.io.IOException exception) {
+            throw new SQLException("An applied block event could not be decoded", exception);
+        }
+        return List.copyOf(events);
+    }
 
     /**
      * Returns contiguous, durably applied world-local sequence coverage for
@@ -329,8 +422,8 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
              ResultSet groups = origins.executeQuery("""
                      SELECT world_id, origin_server_id, COUNT(*) AS applied_count,
                             MAX(world_sequence) AS highest_sequence
-                     FROM received_events
-                     WHERE status = 'APPLIED' AND world_sequence > 0
+                     FROM applied_block_events
+                     WHERE world_sequence > 0
                      GROUP BY world_id, origin_server_id
                      ORDER BY world_id, origin_server_id
                      """)) {
@@ -345,9 +438,9 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                 } else {
                     long expected = 1L;
                     try (PreparedStatement sequences = connection.prepareStatement("""
-                            SELECT world_sequence FROM received_events
+                            SELECT world_sequence FROM applied_block_events
                             WHERE world_id = ? AND origin_server_id = ?
-                              AND status = 'APPLIED' AND world_sequence > 0
+                              AND world_sequence > 0
                             ORDER BY world_sequence ASC
                             """)) {
                         sequences.setString(1, world);

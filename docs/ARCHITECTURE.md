@@ -97,3 +97,9 @@ The current milestone provides only the immutable manifest model and strict cano
 `IncrementalChunkCapture` is a bounded Paper-thread capture primitive. It snapshots only chunks loaded at the beginning of a capture, processes no more than the configured per-tick budget (maximum eight), sorts chunk coordinates for deterministic traversal, and skips chunks that unload before sampling. It never calls a chunk-loading or generation API. Captured `ChunkSnapshot` values are immutable hand-off objects; consumers must keep the main-thread callback short and perform serialization/storage asynchronously.
 
 This is not yet a consistent world snapshot. The multi-tick scan has no atomic world boundary and must not be published with a single snapshot watermark. Event reconciliation, durable output staging, cancellation policy, and a verified completion manifest remain later steps.
+
+### Snapshot reconciliation and recovery
+
+Successfully applied block mutations are retained in an append-only SQLite history in the same transaction that marks their inbox rows applied. The history survives later winner changes, which previously replaced an event's status with `SUPERSEDED`. Snapshot reconciliation overlays post-boundary durable effects in deterministic Lamport/origin/sequence order, allowing a multi-tick chunk scan to be brought forward to a later replayable state.
+
+The reconciler is a pure data transformation. It does not establish a Paper-thread boundary, create files, compute a manifest, or advertise a complete snapshot. Until those steps are orchestrated with durable-write draining and atomic file promotion, the scan remains non-publishable.

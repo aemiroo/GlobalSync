@@ -113,3 +113,5 @@ World-local snapshot coverage is tracked separately from the global per-origin d
 
 
 The snapshot work currently includes a bounded, loaded-chunk capture primitive only. It samples immutable chunk snapshots over multiple ticks and deliberately does not publish or install them: a consistency/reconciliation protocol is still required before any capture can be treated as a valid world snapshot.
+
+Snapshot consistency groundwork now keeps an append-only record of successfully applied block events, including effects later superseded in the inbox, and provides a deterministic reconciler for chunk scans. The capture-to-manifest pipeline is not wired yet; no snapshot is advertised as complete by this milestone.
