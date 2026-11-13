@@ -11,6 +11,7 @@ import dev.aemiroo.globalsync.replication.BlockApplicationService;
 import dev.aemiroo.globalsync.replication.LogicalClock;
 import dev.aemiroo.globalsync.replication.PeerReplicationProgress;
 import dev.aemiroo.globalsync.replication.OriginSequenceProgress;
+import dev.aemiroo.globalsync.replication.GapRecoveryProgress;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
@@ -295,6 +296,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
                 try {
                     List<OriginSequenceProgress> origins = receivedEventStore.originSequenceProgress();
+                    List<GapRecoveryProgress> recoveries = receivedEventStore.gapRecoveryProgress();
                     Bukkit.getScheduler().runTask(this, () -> {
                         sender.sendMessage("§6Inbound origin sequence coverage");
                         if (origins.isEmpty()) {
@@ -313,7 +315,24 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                                         + " §8| §7received: §f" + origin.receivedEvents());
                             }
                         }
-                        sender.sendMessage("§8A gap is diagnostic; no automatic replay or world repair is triggered.");
+                        if (recoveries.isEmpty()) {
+                            sender.sendMessage("§7No persisted gap-recovery records.");
+                        } else {
+                            sender.sendMessage("§6Selective gap-recovery state");
+                            for (GapRecoveryProgress recovery : recoveries) {
+                                long age = Math.max(0, Duration.between(recovery.firstDetectedAt(), Instant.now()).toSeconds());
+                                String color = recovery.unavailable() ? "§c" : "§e";
+                                sender.sendMessage(color + recovery.originServerId() + "#" + recovery.originSequence()
+                                        + " §7" + recovery.status() + " §8| §7unresolved: §f" + age + "s");
+                                if (recovery.unavailableAt() != null) {
+                                    long unavailableAge = Math.max(0, Duration.between(
+                                            recovery.unavailableAt(), Instant.now()).toSeconds());
+                                    sender.sendMessage("  §7Origin reported NOT_RETAINED: §f" + unavailableAge + "s ago");
+                                }
+                            }
+                        }
+                        sender.sendMessage("§8Selective replay is attempted for detected gaps; unavailable history remains unresolved.");
+                        sender.sendMessage("§8Sequence coverage and recovery state do not prove world equivalence.");
                     });
                 } catch (SQLException exception) {
                     getLogger().log(Level.WARNING, "Could not read origin sequence coverage.", exception);
