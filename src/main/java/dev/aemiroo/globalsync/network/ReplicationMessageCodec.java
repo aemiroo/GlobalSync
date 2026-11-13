@@ -20,6 +20,8 @@ import java.util.UUID;
 public final class ReplicationMessageCodec {
     private static final Set<String> EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
             "worldId", "originServerId", "sequence", "logicalClock", "createdAt", "eventType", "attributes");
+    private static final Set<String> LEGACY_EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
+            "worldId", "originServerId", "sequence", "createdAt", "eventType", "attributes");
     private static final Set<String> ACK_FIELDS = Set.of("type", "protocolVersion", "eventId", "journalOffset");
     private static final Set<String> BLOCK_ATTRIBUTES = Set.of("player_uuid", "x", "y", "z",
             "previous_block_data", "new_block_data");
@@ -84,6 +86,52 @@ public final class ReplicationMessageCodec {
                             "z", Integer.toString(z), "previous_block_data", previous, "new_block_data", next));
         } catch (RuntimeException exception) {
             throw new IOException("Invalid replication event envelope", exception);
+        }
+    }
+
+
+    /**
+     * Converts a previously accepted v1 inbox row into the v2 envelope.
+     * Legacy events had no Lamport clock, so origin sequence is used as a
+     * deterministic migration seed; it cannot reconstruct lost cross-node causality.
+     */
+    public static ReplicationEnvelope decodeLegacyEvent(byte[] payload) throws IOException {
+        JsonObject json = parse(payload);
+        requireFields(json, LEGACY_EVENT_FIELDS);
+        if (!"EVENT".equals(string(json, "type")) || integer(json, "protocolVersion") != 1)
+            throw new IOException("Stored event is not a legacy protocol-v1 EVENT");
+        String eventType = string(json, "eventType");
+        if (!"BLOCK_PLACE".equals(eventType) && !"BLOCK_BREAK".equals(eventType))
+            throw new IOException("Legacy event type is not eligible for migration");
+        JsonElement attrsElement = json.get("attributes");
+        if (attrsElement == null || !attrsElement.isJsonObject())
+            throw new IOException("Legacy event attributes must be an object");
+        JsonObject attrs = attrsElement.getAsJsonObject();
+        requireFields(attrs, BLOCK_ATTRIBUTES);
+        String player = string(attrs, "player_uuid");
+        try {
+            if (!UUID.fromString(player).toString().equalsIgnoreCase(player)) throw new IllegalArgumentException();
+        } catch (IllegalArgumentException exception) {
+            throw new IOException("Invalid legacy player UUID", exception);
+        }
+        int x = integerText(attrs, "x"), y = integerText(attrs, "y"), z = integerText(attrs, "z");
+        String previous = boundedText(attrs, "previous_block_data", 512);
+        String next = boundedText(attrs, "new_block_data", 512);
+        if ("BLOCK_BREAK".equals(eventType) && !"minecraft:air".equals(next))
+            throw new IOException("Legacy BLOCK_BREAK must result in minecraft:air");
+        if ("BLOCK_PLACE".equals(eventType) && "minecraft:air".equals(next))
+            throw new IOException("Legacy BLOCK_PLACE cannot result in minecraft:air");
+        try {
+            long sequence = longInteger(json, "sequence");
+            return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION,
+                    UUID.fromString(string(json, "eventId")), string(json, "worldId"),
+                    string(json, "originServerId"), sequence, sequence,
+                    Instant.parse(string(json, "createdAt")), eventType,
+                    Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
+                            "z", Integer.toString(z), "previous_block_data", previous,
+                            "new_block_data", next));
+        } catch (RuntimeException exception) {
+            throw new IOException("Invalid legacy replication envelope", exception);
         }
     }
 
