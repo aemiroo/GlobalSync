@@ -206,6 +206,68 @@ class SqliteReceivedEventStoreTest {
     }
 
     @Test
+    void gapRecoveryStateSurvivesRestartAndLateEventClearsIt() throws Exception {
+        Path database = directory.resolve("gap-recovery.db");
+        Instant detected = Instant.parse("2026-11-13T01:00:00Z");
+        Instant unavailable = detected.plusSeconds(30);
+        ReplicationEnvelope missing = event("region-alpha", 3, 3, "minecraft:granite");
+
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(database)) {
+            store.accept(event("region-alpha", 1, 1, "minecraft:stone"));
+            store.accept(event("region-alpha", 4, 4, "minecraft:glass"));
+            store.markGapRequested("region-alpha", 2, detected);
+            store.markGapUnavailable("region-alpha", 2, unavailable);
+            store.markGapRequested("region-alpha", 2, unavailable.plusSeconds(10));
+            var record = store.gapRecoveryProgress().getFirst();
+            assertEquals("UNAVAILABLE", record.status());
+            assertEquals(detected, record.firstDetectedAt());
+            assertEquals(unavailable.plusSeconds(10), record.lastCheckedAt());
+            assertEquals(unavailable, record.unavailableAt());
+        }
+
+        try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
+            var record = recovered.gapRecoveryProgress().getFirst();
+            assertEquals("region-alpha", record.originServerId());
+            assertEquals(2, record.originSequence());
+            assertTrue(record.unavailable());
+            recovered.accept(missing);
+            assertTrue(recovered.gapRecoveryProgress().isEmpty());
+            assertFalse(recovered.originSequenceProgress().getFirst().hasGap());
+        }
+    }
+
+    @Test
+    void gapRecoveryRecordsAreIndependentAcrossOriginsAndSequences() throws Exception {
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("multiple-gaps.db"))) {
+            Instant now = Instant.parse("2026-11-13T02:00:00Z");
+            store.markGapRequested("region-alpha", 2, now);
+            store.markGapUnavailable("region-alpha", 4, now.plusSeconds(1));
+            store.markGapRequested("region-beta", 7, now.plusSeconds(2));
+
+            var records = store.gapRecoveryProgress();
+            assertEquals(3, records.size());
+            assertEquals(List.of("region-alpha", "region-alpha", "region-beta"),
+                    records.stream().map(GapRecoveryProgress::originServerId).toList());
+            assertEquals(List.of(2L, 4L, 7L),
+                    records.stream().map(GapRecoveryProgress::originSequence).toList());
+            assertEquals(List.of("REQUESTED", "UNAVAILABLE", "REQUESTED"),
+                    records.stream().map(GapRecoveryProgress::status).toList());
+        }
+    }
+
+    @Test
+    void gapRecoveryRejectsInvalidOriginAndSequence() throws Exception {
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("invalid-gap.db"))) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.markGapRequested("../peer", 1, Instant.now()));
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.markGapRequested("region-alpha", 0, Instant.now()));
+            assertThrows(IllegalArgumentException.class,
+                    () -> store.markGapUnavailable("region-alpha", -1, Instant.now()));
+        }
+    }
+
+    @Test
     void exactRetriesRemainIdempotentAndConflictingReuseIsRejected() throws Exception {
         try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("retry.db"))) {
             ReplicationEnvelope original = event("region-alpha", 1, 1, "minecraft:stone");
