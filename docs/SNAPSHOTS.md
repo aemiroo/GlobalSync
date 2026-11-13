@@ -4,9 +4,9 @@ This document defines the metadata and transfer contract for world-state snapsho
 
 ## Scope
 
-The first snapshot data format is `PAPER_BLOCK_DATA_V1`, scoped to one configured shared world and the currently supported block-state replication domain. It is not a complete Minecraft world backup. Player inventories, entities, block entities and container contents, scheduled ticks, fluids, redstone, weather, time, gamerules, and other environmental simulation are outside this format.
+The snapshot data formats are `PAPER_BLOCK_DATA_V1` and `PAPER_BLOCK_DATA_V2`, scoped to one configured shared world and the currently supported block-state replication domain. V1 contains block records but no coverage declaration, so a receiver cannot infer whether an omitted coordinate was outside the capture or represented air. V1 must not be used to clear or replace world state. V2 declares the exact covered chunks and is the format required by any future world restore. Neither format is a complete Minecraft world backup. Player inventories, entities, block entities and container contents, scheduled ticks, fluids, redstone, weather, time, gamerules, and other environmental simulation are outside these formats.
 
-No snapshot payload writer exists yet. The exact record framing and capture implementation must be specified and tested before a node emits a manifest for an actual snapshot. The manifest codec must not be interpreted as proof that a snapshot file exists or is usable.
+The streaming codecs define V1 and V2 payload framing, but no snapshot production pipeline exists yet. A V2 payload writer must be given the exact set of fully captured chunks and block records before a node emits a manifest. The manifest codec must not be interpreted as proof that a snapshot file exists or is usable.
 
 ## Manifest
 
@@ -16,7 +16,7 @@ A version-1 manifest contains:
 - `worldId`: one shared-world identifier.
 - `sourceServerId`: the node that captured the snapshot.
 - `createdAt`: canonical UTC-capable ISO-8601 instant; diagnostic metadata only.
-- `dataFormat`: currently `PAPER_BLOCK_DATA_V1`.
+- `dataFormat`: `PAPER_BLOCK_DATA_V1` (legacy, no coverage) or `PAPER_BLOCK_DATA_V2` (explicit covered chunks).
 - `contentLengthBytes`: exact payload byte length, from 1 byte through 64 GiB.
 - `contentSha256`: lowercase SHA-256 hex digest of the exact payload bytes.
 - `blockCount`: number of block-state records in the payload; zero is valid.
@@ -102,7 +102,24 @@ Records must be strictly sorted by ascending `x`, then `y`, then `z`. Duplicate 
 
 The codec is streaming: it does not buffer the entire payload, close caller-owned streams, load classes, deserialize Java objects, or interpret paths. It validates strict UTF-8 and rejects malformed headers, unsupported versions, invalid record counts, unsorted or duplicate coordinates, malformed BlockData, truncated records, and trailing data. The writer reports the exact emitted byte length so a caller can compute the manifest length and digest while writing to a temporary file.
 
-This defines the bytes represented by `PAPER_BLOCK_DATA_V1`; it does **not** implement a Paper world capture. A future capture service must obtain records from Bukkit/Paper safely on the server thread, avoid force-loading chunks, define which loaded/known chunks are in scope, and coordinate its event watermark with actual applied world state. No snapshot manifest should be produced until that capture boundary can be proven coherent.
+This defines the bytes represented by `PAPER_BLOCK_DATA_V1`; it does **not** implement a Paper world capture. V1 has no coverage metadata and is not suitable for replacing a region or clearing omitted blocks.
+
+## PAPER_BLOCK_DATA_V2 payload framing and coverage
+
+V2 adds explicit coverage to the payload so a future installer can distinguish a covered chunk whose air blocks are omitted from a chunk that was never captured:
+
+| Field | Encoding |
+|---|---|
+| Magic | 4 bytes: ASCII `GSB2` |
+| Payload version | 1 unsigned byte; currently `2` |
+| Covered chunk count | 4-byte unsigned big-endian integer, at most 65,536 |
+| Covered chunks | Each is signed 32-bit chunk X then signed 32-bit chunk Z, strictly sorted by X then Z |
+| Block record count | 4-byte unsigned big-endian integer, matching the manifest `blockCount` |
+| Each block record | Same framing as V1: signed 32-bit X/Y/Z, unsigned 16-bit UTF-8 byte length, then canonical BlockData bytes |
+
+Every block record must fall inside one declared covered chunk. Covered chunks may contain zero records, which represents all-air block state for that chunk. A future installer may clear only these declared chunks and then apply the listed block records; it must leave every other chunk untouched. The V2 codec validates the sorted coverage list, count bounds, strict record ordering, record-to-coverage membership, and absence of trailing bytes while streaming. The list is bounded to the same 65,536-chunk capture limit and is the only coverage index buffered by the codec.
+
+V2 makes the payload's spatial scope expressible; it does **not** make a coherent snapshot producer or installer. Capture still must sample loaded chunks safely on the server thread, avoid force-loading chunks, and reconcile edits across the multi-tick scan before creating a manifest. No snapshot should be advertised as consistent until that lifecycle is connected. V1 remains transferable for compatibility but future world restore must reject it because its spatial coverage is unknown.
 
 
 ## Durable world-local applied coverage

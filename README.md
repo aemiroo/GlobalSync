@@ -36,6 +36,7 @@ Implemented so far:
 - Separate SQLite inbound inbox (`journal/received.db`) with durable deduplication by event ID and origin sequence.
 - Authenticated snapshot-transfer receiver with strict manifest/chunk validation and isolated, durable staging; staged snapshots are not installed into live worlds.
 - Stop-and-wait outbound snapshot sender for caller-supplied completed payloads, with local file, length, and SHA-256 checks and exact per-chunk acknowledgements.
+- Streaming snapshot payload codecs for legacy V1 and coverage-aware V2; V2 binds every block record to an explicitly declared covered chunk.
 - Receiver ACKs only after the inbound inbox transaction commits.
 - Bidirectional stop-and-wait delivery from each node's local journal, with one outstanding event per peer.
 - Per-peer local journal acknowledgement cursors persisted in SQLite and resumed after restart.
@@ -48,7 +49,7 @@ Authenticated peers exchange allowlisted block-edit events in both directions an
 
 Not implemented yet:
 
-- Paper world snapshot capture, outbound snapshot production, live-world snapshot installation, and post-install event reconciliation. The receiver can only stage and verify opaque snapshot payloads.
+- Paper world snapshot capture, outbound snapshot production, live-world snapshot installation, and post-install event reconciliation. The receiver can only stage and verify opaque snapshot payloads; V1 has no restore-safe coverage, and V2 has no producer yet.
 - Capture of environmental changes, block entities, containers, and other non-player mutations.
 - Global consensus, partition fencing, and snapshot-based replica repair.
 - Expanded peer health metrics and configurable rate limits.

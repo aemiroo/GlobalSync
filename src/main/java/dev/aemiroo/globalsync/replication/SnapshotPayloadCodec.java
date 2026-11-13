@@ -13,17 +13,21 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
- * Deterministic, streaming binary representation of PAPER_BLOCK_DATA_V1.
+ * Deterministic, streaming binary representations of PAPER_BLOCK_DATA_V1 and V2.
  *
- * <p>The payload contains only block coordinates and canonical Bukkit
+ * <p>The payload contains only explicit chunk coverage, block coordinates, and canonical Bukkit
  * BlockData strings. It is not a world archive and has no path, entity,
  * inventory, block-entity, or executable content.</p>
  */
 public final class SnapshotPayloadCodec {
     private static final int MAGIC = 0x47534231; // "GSB1"
     private static final int VERSION = 1;
+    private static final int COVERAGE_VERSION = 2;
+    private static final int COVERAGE_MAGIC = 0x47534232; // "GSB2"
     private static final int HEADER_BYTES = 9;
     public static final int MAX_BLOCK_DATA_BYTES = 1024;
     public static final long MAX_BLOCK_RECORDS = 16_777_216L;
@@ -40,9 +44,22 @@ public final class SnapshotPayloadCodec {
         }
     }
 
+    /** A chunk whose complete block-state contents are represented by a V2 payload. */
+    public record ChunkCoordinate(int x, int z) implements Comparable<ChunkCoordinate> {
+        @Override public int compareTo(ChunkCoordinate other) {
+            int byX = Integer.compare(x, other.x);
+            return byX != 0 ? byX : Integer.compare(z, other.z);
+        }
+    }
+
     @FunctionalInterface
     public interface BlockRecordConsumer {
         void accept(BlockRecord record) throws IOException;
+    }
+
+    @FunctionalInterface
+    public interface CoveredChunkConsumer {
+        void accept(ChunkCoordinate chunk) throws IOException;
     }
 
     private SnapshotPayloadCodec() { }
@@ -86,6 +103,73 @@ public final class SnapshotPayloadCodec {
             written++;
         }
         if (written != expectedRecords)
+            throw new IOException("Snapshot contains fewer records than declared");
+        data.flush();
+        return totalLength;
+    }
+
+    /**
+     * Writes PAPER_BLOCK_DATA_V2, which records the exact chunk coverage before
+     * the block records. A receiver can therefore clear covered chunks before
+     * applying the listed non-air states without touching chunks outside the
+     * captured set. Inputs are streamed; only the bounded coverage index is held.
+     */
+    public static long writeV2(OutputStream output, Iterable<ChunkCoordinate> coveredChunks,
+                               long expectedChunks, Iterable<BlockRecord> records,
+                               long expectedRecords) throws IOException {
+        Objects.requireNonNull(output, "output");
+        Objects.requireNonNull(coveredChunks, "coveredChunks");
+        Objects.requireNonNull(records, "records");
+        if (expectedChunks < 0 || expectedChunks > 65_536L)
+            throw new IOException("Snapshot covered-chunk count exceeds the supported limit");
+        if (expectedRecords < 0 || expectedRecords > MAX_BLOCK_RECORDS)
+            throw new IOException("Snapshot block count exceeds the supported limit");
+
+        DataOutputStream data = new DataOutputStream(output);
+        data.writeInt(COVERAGE_MAGIC);
+        data.writeByte(COVERAGE_VERSION);
+        data.writeInt((int) expectedChunks);
+        Set<ChunkCoordinate> coverage = new HashSet<>((int) Math.min(expectedChunks * 2 + 1, 131_073));
+        ChunkCoordinate previousChunk = null;
+        long writtenChunks = 0;
+        long totalLength = 9L;
+        for (ChunkCoordinate chunk : coveredChunks) {
+            if (chunk == null || writtenChunks >= expectedChunks
+                    || (previousChunk != null && previousChunk.compareTo(chunk) >= 0))
+                throw new IOException("Snapshot covered chunks are not strictly sorted or exceed their declared count");
+            coverage.add(chunk);
+            data.writeInt(chunk.x());
+            data.writeInt(chunk.z());
+            totalLength = Math.addExact(totalLength, 8L);
+            previousChunk = chunk;
+            writtenChunks++;
+        }
+        if (writtenChunks != expectedChunks)
+            throw new IOException("Snapshot contains fewer covered chunks than declared");
+
+        data.writeInt((int) expectedRecords);
+        totalLength = Math.addExact(totalLength, 4L);
+        BlockRecord previous = null;
+        long writtenRecords = 0;
+        for (BlockRecord record : records) {
+            if (record == null || writtenRecords >= expectedRecords
+                    || (previous != null && compare(previous, record) >= 0))
+                throw new IOException("Snapshot block records are not strictly sorted or exceed their declared count");
+            if (!coverage.contains(new ChunkCoordinate(record.x() >> 4, record.z() >> 4)))
+                throw new IOException("Snapshot block record lies outside declared chunk coverage");
+            byte[] blockData = record.blockData().getBytes(StandardCharsets.UTF_8);
+            if (blockData.length < 1 || blockData.length > MAX_BLOCK_DATA_BYTES)
+                throw new IOException("Snapshot block data exceeds its size limit");
+            data.writeInt(record.x());
+            data.writeInt(record.y());
+            data.writeInt(record.z());
+            data.writeShort(blockData.length);
+            data.write(blockData);
+            totalLength = Math.addExact(totalLength, 14L + blockData.length);
+            previous = record;
+            writtenRecords++;
+        }
+        if (writtenRecords != expectedRecords)
             throw new IOException("Snapshot contains fewer records than declared");
         data.flush();
         return totalLength;
@@ -138,6 +222,67 @@ public final class SnapshotPayloadCodec {
             previous = record;
         }
         if (data.read() != -1) throw new IOException("Snapshot payload contains trailing bytes");
+    }
+
+    /** Reads and validates a V2 payload, reporting its explicit chunk coverage. */
+    public static long readV2(InputStream input, long expectedRecords,
+                              CoveredChunkConsumer chunkConsumer,
+                              BlockRecordConsumer recordConsumer) throws IOException {
+        Objects.requireNonNull(input, "input");
+        Objects.requireNonNull(chunkConsumer, "chunkConsumer");
+        Objects.requireNonNull(recordConsumer, "recordConsumer");
+        if (expectedRecords < 0 || expectedRecords > MAX_BLOCK_RECORDS)
+            throw new IOException("Snapshot block count exceeds the supported limit");
+        DataInputStream data = new DataInputStream(new BufferedInputStream(input));
+        if (data.readInt() != COVERAGE_MAGIC || data.readUnsignedByte() != COVERAGE_VERSION)
+            throw new IOException("Invalid snapshot coverage payload header");
+        long chunkCount = Integer.toUnsignedLong(data.readInt());
+        if (chunkCount > 65_536L) throw new IOException("Snapshot covered-chunk count exceeds the supported limit");
+        Set<ChunkCoordinate> coverage = new HashSet<>((int) Math.min(chunkCount * 2 + 1, 131_073));
+        ChunkCoordinate previousChunk = null;
+        for (long index = 0; index < chunkCount; index++) {
+            final ChunkCoordinate chunk;
+            try {
+                chunk = new ChunkCoordinate(data.readInt(), data.readInt());
+            } catch (EOFException exception) {
+                throw new IOException("Snapshot payload ended inside its chunk coverage header", exception);
+            }
+            if (previousChunk != null && previousChunk.compareTo(chunk) >= 0)
+                throw new IOException("Snapshot covered chunks are not strictly sorted");
+            chunkConsumer.accept(chunk);
+            coverage.add(chunk);
+            previousChunk = chunk;
+        }
+        long count = Integer.toUnsignedLong(data.readInt());
+        if (count != expectedRecords || count > MAX_BLOCK_RECORDS)
+            throw new IOException("Snapshot payload record count does not match its manifest");
+        BlockRecord previous = null;
+        for (long index = 0; index < count; index++) {
+            final int x, y, z, length;
+            try {
+                x = data.readInt(); y = data.readInt(); z = data.readInt(); length = data.readUnsignedShort();
+            } catch (EOFException exception) {
+                throw new IOException("Snapshot payload ended inside a block record", exception);
+            }
+            if (length < 1 || length > MAX_BLOCK_DATA_BYTES)
+                throw new IOException("Snapshot block data length is invalid");
+            byte[] bytes = data.readNBytes(length);
+            if (bytes.length != length) throw new IOException("Snapshot block data is truncated");
+            final BlockRecord record;
+            try {
+                record = new BlockRecord(x, y, z, decodeStrict(bytes));
+            } catch (IllegalArgumentException exception) {
+                throw new IOException("Snapshot contains invalid block data", exception);
+            }
+            if (previous != null && compare(previous, record) >= 0)
+                throw new IOException("Snapshot block records are not strictly coordinate-sorted");
+            if (!coverage.contains(new ChunkCoordinate(x >> 4, z >> 4)))
+                throw new IOException("Snapshot block record lies outside declared chunk coverage");
+            recordConsumer.accept(record);
+            previous = record;
+        }
+        if (data.read() != -1) throw new IOException("Snapshot payload contains trailing bytes");
+        return chunkCount;
     }
 
     public static long headerLength() {
