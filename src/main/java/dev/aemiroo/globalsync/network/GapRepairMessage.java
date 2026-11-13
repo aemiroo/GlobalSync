@@ -27,11 +27,12 @@ public final class GapRepairMessage {
             Set.of("type", "protocolVersion", "requestId", "event");
     private static final Set<String> UNAVAILABLE_FIELDS =
             Set.of("type", "protocolVersion", "requestId", "originServerId", "sequence", "reason");
+    private static final Set<String> RECEIVED_FIELDS = Set.of("type", "protocolVersion", "requestId", "eventId");
 
-    public enum Type { REQUEST, EVENT, UNAVAILABLE }
+    public enum Type { REQUEST, EVENT, UNAVAILABLE, RECEIVED }
     public enum UnavailableReason { NOT_RETAINED }
     public record Message(Type type, UUID requestId, String originServerId,
-                          long sequence, String eventPayload, UnavailableReason reason) { }
+                          long sequence, String eventPayload, UnavailableReason reason, UUID eventId) { }
 
     private GapRepairMessage() { }
 
@@ -47,6 +48,12 @@ public final class GapRepairMessage {
     public static byte[] encodeEvent(UUID requestId, ReplicationEnvelope event) {
         JsonObject json = base("GAP_EVENT", requestId);
         json.addProperty("event", new String(ReplicationMessageCodec.encodeEvent(event), StandardCharsets.UTF_8));
+        return bytes(json);
+    }
+
+    public static byte[] encodeReceived(UUID requestId, UUID eventId) {
+        JsonObject json = base("GAP_RECEIVED", requestId);
+        json.addProperty("eventId", java.util.Objects.requireNonNull(eventId, "eventId").toString());
         return bytes(json);
     }
 
@@ -76,14 +83,14 @@ public final class GapRepairMessage {
                     String origin = string(json, "originServerId");
                     validateOriginForDecode(origin);
                     long sequence = positiveSequence(json);
-                    yield new Message(Type.REQUEST, requestId, origin, sequence, null, null);
+                    yield new Message(Type.REQUEST, requestId, origin, sequence, null, null, null);
                 }
                 case "GAP_EVENT" -> {
                     requireFields(json, EVENT_FIELDS);
                     String event = string(json, "event");
                     if (event.length() > FrameCodec.DEFAULT_MAX_FRAME_BYTES)
                         throw new IOException("Gap event payload exceeds the frame limit");
-                    yield new Message(Type.EVENT, requestId, null, 0, event, null);
+                    yield new Message(Type.EVENT, requestId, null, 0, event, null, null);
                 }
                 case "GAP_UNAVAILABLE" -> {
                     requireFields(json, UNAVAILABLE_FIELDS);
@@ -93,7 +100,11 @@ public final class GapRepairMessage {
                     if (!UnavailableReason.NOT_RETAINED.name().equals(string(json, "reason")))
                         throw new IOException("Unsupported gap-unavailable reason");
                     yield new Message(Type.UNAVAILABLE, requestId, origin, sequence, null,
-                            UnavailableReason.NOT_RETAINED);
+                            UnavailableReason.NOT_RETAINED, null);
+                }
+                case "GAP_RECEIVED" -> {
+                    requireFields(json, RECEIVED_FIELDS);
+                    yield new Message(Type.RECEIVED, requestId, null, 0, null, null, uuid(json, "eventId"));
                 }
                 default -> throw new IOException("Unsupported gap-repair message type");
             };

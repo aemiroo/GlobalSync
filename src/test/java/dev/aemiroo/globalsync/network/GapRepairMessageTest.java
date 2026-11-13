@@ -59,6 +59,16 @@ class GapRepairMessageTest {
     }
 
     @Test
+    void roundTripsReceiptForTheExactRepairedEvent() throws Exception {
+        UUID requestId = UUID.randomUUID();
+        UUID eventId = UUID.randomUUID();
+        var decoded = GapRepairMessage.decode(GapRepairMessage.encodeReceived(requestId, eventId));
+        assertEquals(GapRepairMessage.Type.RECEIVED, decoded.type());
+        assertEquals(requestId, decoded.requestId());
+        assertEquals(eventId, decoded.eventId());
+    }
+
+    @Test
     void identifiesOnlyGapRepairFrames() {
         assertTrue(GapRepairMessage.isGapMessage(GapRepairMessage.encodeRequest(UUID.randomUUID(), "node-eu", 1)));
         assertFalse(GapRepairMessage.isGapMessage(ReplicationMessageCodec.encodeEvent(event())));

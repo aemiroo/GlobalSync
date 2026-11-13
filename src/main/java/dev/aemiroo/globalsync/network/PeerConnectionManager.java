@@ -57,6 +57,8 @@ public final class PeerConnectionManager implements AutoCloseable {
     private final ScheduledExecutorService heartbeatWorker;
     private final PeerMessageRateLimiter controlRateLimiter =
             new PeerMessageRateLimiter(64, 10.0, 20.0, 16_384.0, 32_768.0);
+    private final PeerMessageRateLimiter gapFrameRateLimiter =
+            new PeerMessageRateLimiter(64, 10.0, 20.0, 1_048_576.0, 2_097_152.0);
     private final Map<String, PeerSession> connections = new ConcurrentHashMap<>();
     private final Set<Socket> pendingSockets = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
@@ -268,6 +270,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             if (messageHandler != null) {
                 PeerSession active = session;
                 deliveryWorkers.execute(() -> deliverJournal(active));
+                requestFirstGap(active);
             }
 
             while (running.get() && session.isOpen()) {
@@ -290,6 +293,10 @@ public final class PeerConnectionManager implements AutoCloseable {
                 if (messageHandler == null) {
                     throw new IOException("Application messages are not enabled");
                 }
+                if (GapRepairMessage.isGapMessage(frame)) {
+                    handleGapMessage(session, frame);
+                    continue;
+                }
                 if (ReplicationMessageCodec.isAcknowledgement(frame)) {
                     PendingDelivery pending = session.pending.get();
                     if (pending == null) throw new IOException("Unsolicited replication acknowledgement");
@@ -299,6 +306,7 @@ public final class PeerConnectionManager implements AutoCloseable {
                 } else {
                     byte[] acknowledgement = messageHandler.handle(frame, peerId);
                     session.write(acknowledgement);
+                    requestFirstGap(session);
                 }
             }
         } catch (IOException | RuntimeException exception) {
@@ -316,11 +324,131 @@ public final class PeerConnectionManager implements AutoCloseable {
         }
     }
 
+    private void requestFirstGap(PeerSession session) throws IOException {
+        if (messageHandler == null || !session.isOpen() || session.pendingGapRequest.get() != null) return;
+        long missing = messageHandler.firstMissingSequenceForOrigin(session.peerId);
+        if (missing < 1) return;
+        PendingGapRequest pending = new PendingGapRequest(UUID.randomUUID(), missing, System.nanoTime(), 0);
+        if (!session.pendingGapRequest.compareAndSet(null, pending)) return;
+        try {
+            session.write(GapRepairMessage.encodeRequest(pending.requestId, session.peerId, missing));
+            logger.info("Requested missing event " + session.peerId + "#" + missing);
+        } catch (IOException exception) {
+            session.pendingGapRequest.compareAndSet(pending, null);
+            throw exception;
+        }
+    }
+
+    private void handleGapMessage(PeerSession session, byte[] frame) throws IOException {
+        if (!gapFrameRateLimiter.tryAcquire(session.peerId, frame.length))
+            throw new IOException("Peer exceeded the gap-repair frame rate limit");
+        GapRepairMessage.Message message = GapRepairMessage.decode(frame);
+        if (message.type() != GapRepairMessage.Type.EVENT
+                && !controlRateLimiter.tryAcquire(session.peerId, frame.length))
+            throw new IOException("Peer exceeded the gap-control rate limit");
+        if (message.type() == GapRepairMessage.Type.EVENT) {
+            PendingGapRequest pending = session.pendingGapRequest.get();
+            if (pending == null || !pending.requestId.equals(message.requestId()))
+                throw new IOException("Unsolicited or mismatched gap event response");
+            byte[] eventPayload = message.eventPayload().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            // Reuse the ordinary authenticated EVENT validation and durable inbox path,
+            // with the additional exact sequence check before the inbox is modified.
+            UUID acceptedEventId = messageHandler.handleGapResponse(eventPayload, session.peerId, pending.sequence);
+            if (!session.pendingGapRequest.compareAndSet(pending, null))
+                throw new IOException("Gap request changed while accepting its response");
+            session.write(GapRepairMessage.encodeReceived(message.requestId(), acceptedEventId));
+            logger.info("Repaired missing event " + session.peerId + "#" + pending.sequence);
+            requestFirstGap(session);
+            return;
+        }
+
+        if (message.type() == GapRepairMessage.Type.UNAVAILABLE) {
+            PendingGapRequest pending = session.pendingGapRequest.get();
+            if (pending == null || !pending.requestId.equals(message.requestId())
+                    || !session.peerId.equals(message.originServerId())
+                    || pending.sequence != message.sequence())
+                throw new IOException("Unsolicited or mismatched gap-unavailable response");
+            session.pendingGapRequest.compareAndSet(pending, null);
+            logger.warning("Peer " + session.peerId + " no longer retains event " + pending.sequence
+                    + "; sequence gap requires operator-assisted recovery");
+            return;
+        }
+
+        if (message.type() == GapRepairMessage.Type.REQUEST) {
+            if (!localServerId.equals(message.originServerId()))
+                throw new IOException("Peer requested an event that does not originate from this server");
+            ServedGapResponse current = session.servedGapResponse.get();
+            if (current != null) {
+                if (!current.requestId.equals(message.requestId()) || current.sequence != message.sequence())
+                    throw new IOException("Peer already has a different outstanding gap response");
+                session.write(current.frame);
+                return;
+            }
+            final java.util.Optional<JournalEntry> entry;
+            try {
+                entry = eventJournal.findByOriginSequence(localServerId, message.sequence());
+            } catch (SQLException exception) {
+                throw new IOException("Could not look up requested origin event", exception);
+            }
+            byte[] response;
+            UUID eventId = null;
+            if (entry.isPresent()) {
+                eventId = entry.get().envelope().eventId();
+                response = GapRepairMessage.encodeEvent(message.requestId(), entry.get().envelope());
+            } else {
+                response = GapRepairMessage.encodeUnavailable(message.requestId(), localServerId, message.sequence());
+            }
+            ServedGapResponse served = new ServedGapResponse(message.requestId(), message.sequence(), eventId, response);
+            if (!session.servedGapResponse.compareAndSet(null, served)) {
+                ServedGapResponse raced = session.servedGapResponse.get();
+                if (raced == null || !raced.requestId.equals(message.requestId()))
+                    throw new IOException("Peer already has an outstanding gap response");
+                session.write(raced.frame);
+                return;
+            }
+            session.write(response);
+            return;
+        }
+
+        if (message.type() == GapRepairMessage.Type.RECEIVED) {
+            ServedGapResponse served = session.servedGapResponse.get();
+            if (served == null || !served.requestId.equals(message.requestId())
+                    || served.eventId == null || !served.eventId.equals(message.eventId()))
+                throw new IOException("Unsolicited or mismatched gap receipt");
+            session.servedGapResponse.compareAndSet(served, null);
+            return;
+        }
+        throw new IOException("Unsupported gap-repair message");
+    }
+
+    private void checkGapRequestTimeout(PeerSession session, long now) {
+        ServedGapResponse served = session.servedGapResponse.get();
+        if (served != null && now - served.sentAtNanos >= TimeUnit.MILLISECONDS.toNanos(acknowledgementTimeoutMillis))
+            session.servedGapResponse.compareAndSet(served, null);
+        PendingGapRequest pending = session.pendingGapRequest.get();
+        if (pending == null || now - pending.sentAtNanos
+                < TimeUnit.MILLISECONDS.toNanos(acknowledgementTimeoutMillis)) return;
+        if (pending.retries >= 3) {
+            logger.warning("Peer " + session.peerId + " did not complete gap repair; reconnecting");
+            session.close();
+            return;
+        }
+        PendingGapRequest retry = new PendingGapRequest(pending.requestId, pending.sequence,
+                now, pending.retries + 1);
+        if (!session.pendingGapRequest.compareAndSet(pending, retry)) return;
+        try {
+            session.write(GapRepairMessage.encodeRequest(retry.requestId, session.peerId, retry.sequence));
+        } catch (IOException exception) {
+            session.close();
+        }
+    }
+
     private void checkHeartbeats() {
         if (!running.get()) return;
         long now = System.nanoTime();
         for (PeerSession session : connections.values()) {
             if (!session.isOpen()) continue;
+            checkGapRequestTimeout(session, now);
             PendingHeartbeat pending = session.pendingHeartbeat.get();
             if (pending != null) {
                 if (now - pending.sentAtNanos >= TimeUnit.MILLISECONDS.toNanos(heartbeatTimeoutMillis)) {
@@ -444,6 +572,29 @@ public final class PeerConnectionManager implements AutoCloseable {
         private PendingDelivery(JournalEntry entry) { this.entry = entry; }
     }
 
+    private static final class PendingGapRequest {
+        private final UUID requestId;
+        private final long sequence;
+        private final long sentAtNanos;
+        private final int retries;
+        private PendingGapRequest(UUID requestId, long sequence, long sentAtNanos, int retries) {
+            this.requestId = requestId; this.sequence = sequence;
+            this.sentAtNanos = sentAtNanos; this.retries = retries;
+        }
+    }
+
+    private static final class ServedGapResponse {
+        private final UUID requestId;
+        private final long sequence;
+        private final UUID eventId;
+        private final byte[] frame;
+        private final long sentAtNanos;
+        private ServedGapResponse(UUID requestId, long sequence, UUID eventId, byte[] frame) {
+            this.requestId = requestId; this.sequence = sequence; this.eventId = eventId;
+            this.frame = frame.clone(); this.sentAtNanos = System.nanoTime();
+        }
+    }
+
     private static final class PendingHeartbeat {
         private final UUID nonce;
         private final long sentAtNanos;
@@ -460,6 +611,8 @@ public final class PeerConnectionManager implements AutoCloseable {
         private final AtomicBoolean open = new AtomicBoolean(true);
         private final AtomicReference<PendingDelivery> pending = new AtomicReference<>();
         private final AtomicReference<PendingHeartbeat> pendingHeartbeat = new AtomicReference<>();
+        private final AtomicReference<PendingGapRequest> pendingGapRequest = new AtomicReference<>();
+        private final AtomicReference<ServedGapResponse> servedGapResponse = new AtomicReference<>();
         private final AtomicLong lastInboundNanos = new AtomicLong(System.nanoTime());
         private final AtomicLong heartbeatPongsReceived = new AtomicLong();
         private PeerSession(String peerId, SSLSocket socket, int maxFrameBytes) {
