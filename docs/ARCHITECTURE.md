@@ -90,3 +90,10 @@ The current plugin is intentionally a thin Paper integration. Protocol types and
 Snapshot metadata is defined in [SNAPSHOTS.md](SNAPSHOTS.md). A manifest describes one world, one immutable payload, and a per-origin vector of contiguous applied event sequences represented by that payload. These values are not local journal offsets or a global commit position. A received-event ACK is not sufficient to advance a snapshot watermark because it confirms durable inbox acceptance, not world application.
 
 The current milestone provides only the immutable manifest model and strict canonical JSON codec. It does not capture, transfer, stage, or install world data. A future capture must coordinate with Paper's server thread and block application to establish a coherent state boundary, then replay events beyond the vector after installation. The current player-block-edit-only capture boundary remains a major limitation; this is not a full Minecraft world snapshot.
+
+
+### Incremental chunk capture
+
+`IncrementalChunkCapture` is a bounded Paper-thread capture primitive. It snapshots only chunks loaded at the beginning of a capture, processes no more than the configured per-tick budget (maximum eight), sorts chunk coordinates for deterministic traversal, and skips chunks that unload before sampling. It never calls a chunk-loading or generation API. Captured `ChunkSnapshot` values are immutable hand-off objects; consumers must keep the main-thread callback short and perform serialization/storage asynchronously.
+
+This is not yet a consistent world snapshot. The multi-tick scan has no atomic world boundary and must not be published with a single snapshot watermark. Event reconciliation, durable output staging, cancellation policy, and a verified completion manifest remain later steps.
