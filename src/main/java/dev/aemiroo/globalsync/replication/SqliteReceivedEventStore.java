@@ -12,6 +12,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -82,6 +83,7 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                         COALESCE((SELECT MAX(logical_clock) FROM received_events), 0))
                     WHERE singleton_id = 1
                     """);
+            migrateLegacyInboxRows();
         } catch (SQLException exception) {
             connection.close();
             throw exception;
@@ -260,6 +262,57 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         try (Statement query = connection.createStatement();
              ResultSet result = query.executeQuery("SELECT COUNT(*) FROM received_events")) {
             return result.next() ? result.getLong(1) : 0;
+        }
+    }
+
+
+    private void migrateLegacyInboxRows() throws SQLException {
+        List<ReplicationEnvelope> legacyEvents = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT payload_json FROM received_events
+                WHERE payload_json LIKE '%"protocolVersion":1%'
+                """);
+             ResultSet result = query.executeQuery()) {
+            while (result.next()) {
+                try {
+                    legacyEvents.add(ReplicationMessageCodec.decodeLegacyEvent(
+                            result.getString("payload_json").getBytes(StandardCharsets.UTF_8)));
+                } catch (java.io.IOException exception) {
+                    throw new SQLException("A legacy inbox event could not be migrated safely", exception);
+                }
+            }
+        }
+        if (legacyEvents.isEmpty()) return;
+
+        legacyEvents.sort(Comparator.comparingLong(ReplicationEnvelope::logicalClock)
+                .thenComparing(ReplicationEnvelope::originServerId)
+                .thenComparingLong(ReplicationEnvelope::sequence));
+
+        try {
+            connection.setAutoCommit(false);
+            for (ReplicationEnvelope event : legacyEvents) {
+                String payload = new String(ReplicationMessageCodec.encodeEvent(event), StandardCharsets.UTF_8);
+                try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE received_events
+                        SET logical_clock = ?, payload_json = ?, status = 'PENDING'
+                        WHERE event_id = ?
+                        """)) {
+                    update.setLong(1, event.logicalClock());
+                    update.setString(2, payload);
+                    update.setString(3, event.eventId().toString());
+                    update.executeUpdate();
+                }
+                if (!updateWinner(event)) setStatus(event.eventId(), "SUPERSEDED");
+                updateLamportClock(event.logicalClock());
+            }
+            connection.commit();
+        } catch (SQLException | RuntimeException exception) {
+            try { connection.rollback(); } catch (SQLException rollbackFailure) {
+                exception.addSuppressed(rollbackFailure);
+            }
+            throw exception;
+        } finally {
+            try { connection.setAutoCommit(true); } catch (SQLException ignored) { }
         }
     }
 
