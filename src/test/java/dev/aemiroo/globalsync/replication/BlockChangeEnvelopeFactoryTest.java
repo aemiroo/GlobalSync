@@ -24,7 +24,7 @@ class BlockChangeEnvelopeFactoryTest {
                 "minecraft:oak_planks"
         );
 
-        assertEquals(1, envelope.protocolVersion());
+        assertEquals(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, envelope.protocolVersion());
         assertEquals("world", envelope.worldId());
         assertEquals("region-asia", envelope.originServerId());
         assertEquals(17, envelope.sequence());

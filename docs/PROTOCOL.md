@@ -11,6 +11,7 @@ Every replicated event should carry:
 - Shared world identifier.
 - Origin node identifier.
 - Origin sequence number.
+- Lamport logical clock for deterministic conflict ordering.
 - Creation timestamp for diagnostics (not for ordering).
 - Event type.
 - Typed payload.
@@ -38,14 +39,14 @@ Each node writes accepted outgoing events to its own SQLite journal before attem
 - The pair of origin node ID and origin sequence is also unique.
 - Retrying the exact same envelope returns its original journal offset.
 - Reusing an event ID or origin sequence for different data is rejected.
-- The node restores its next sequence from the maximum sequence already persisted for that origin.
+- The node restores its next sequence from the maximum sequence already persisted for that origin. Existing v1 outgoing journal rows are migrated to v2 with a bounded logical-clock seed derived from their origin sequence. Existing v1 inbox rows are migrated to canonical v2 payloads and inserted into the winner index so an unacknowledged replay is still recognized as the same event.
 - Replay reads entries after a local journal offset in ascending order.
 
 A journal offset belongs to one database. It is not comparable across regions and is not a global commit index. The current implementation does not yet prune acknowledged entries or coordinate retention across peers.
 
 ## Authenticated peer connection
 
-After the authenticated HELLO/READY handshake, the connection can receive version-1 EVENT frames. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the SQLite transaction commits. The sender reads the local journal in offset order, sends one event per peer at a time, and advances its durable per-peer cursor only after a matching ACK is received. The ACK's `journalOffset` is the receiver's inbox offset; the sender separately persists the corresponding local journal offset.
+After the authenticated HELLO/READY handshake, the connection can receive version-2 EVENT frames. The transport HELLO/READY handshake remains protocol version 1; the application EVENT/ACK envelope is version 2. The receiver validates the authenticated origin, shared-world allowlist, event type, exact JSON field sets, and block-edit payload before storing the event and deterministic per-block winner decision in a separate durable inbox. It sends an ACK containing the event ID and receiver-local inbox offset only after the FULL-synchronous transaction commits. The sender reads the local journal in offset order, sends one event per peer at a time, and advances its durable per-peer cursor only after a matching ACK is received. The ACK's `journalOffset` is the receiver's inbox offset; the sender separately persists the corresponding local journal offset.
 
 - TLS 1.3 is required; the server requires a client certificate.
 - The TLS trust store validates the certificate chain. After the TLS handshake, the remote node must also present a leaf certificate whose SHA-256 fingerprint matches the configured fingerprint for its claimed server ID.
@@ -56,8 +57,8 @@ After the authenticated HELLO/READY handshake, the connection can receive versio
 - Inbound and outbound connections share a bounded worker pool. Excess connections are rejected. TLS handshakes have a configured read timeout.
 - EVENT messages are currently limited to `BLOCK_PLACE` and `BLOCK_BREAK`; their payload must contain exactly the player UUID, integer coordinates, previous block data, and resulting block data.
 - The receiver binds `originServerId` to the authenticated TLS peer ID and checks the world against `shared-worlds`.
-- The receiver inbox is stored separately at `journal/received.db` with WAL mode and FULL synchronous commits. Event ID and `(origin node, origin sequence)` are unique keys. Exact retries return the original inbox offset; conflicting reuse is rejected.
-- ACK messages contain only the protocol version, event ID, and receiver-local durable inbox offset. They are not global offsets and do not imply that the event was applied to the Minecraft world.
+- The receiver inbox is stored separately at `journal/received.db` with WAL mode and FULL synchronous commits. Event ID and `(origin node, origin sequence)` are unique keys. Exact retries return the original inbox offset; conflicting reuse is rejected. The inbox also stores pending/applied/superseded states, a Lamport clock high-water mark, and a per-block winner index.
+- ACK messages contain only the protocol version, event ID, and receiver-local durable inbox offset. They are not global offsets and confirm durable receipt/winner selection, not successful application to the Minecraft world.
 - Each node independently sends its own journal over the same full-duplex TLS connection. A single reader dispatches EVENT and ACK frames; writes are serialized.
 - Delivery is stop-and-wait: at most one event per peer is awaiting acknowledgement. This intentionally bounds in-flight memory and preserves journal order.
 - The sender persists a per-peer cursor in the local `events.db` database. It advances only for the exact next local journal row and only after an ACK with the expected event ID. The receiver's inbox offset is stored as diagnostic metadata, never as the sender's cursor.
@@ -66,18 +67,24 @@ After the authenticated HELLO/READY handshake, the connection can receive versio
 
 Configure each remote peer under `network.peers.<server-id>` with `host`, `port`, and the SHA-256 fingerprint of its leaf certificate. The host must match a DNS name or IP address in the peer certificate's subject alternative name. Each node must also have its own PKCS12 identity store and a trust store containing the certificates or issuing CA certificates it is configured to trust.
 
-The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables bidirectional durable event delivery. Received events are not applied to the Minecraft world. Use it only in a controlled test network with operator-provisioned certificates and firewall restrictions.
+The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables bidirectional durable event delivery. Remote application is separately controlled by `application.enabled`, which also defaults to `false`. Use both only in a controlled test network with operator-provisioned certificates and firewall restrictions.
 
 ## Delivery requirements
 
-Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Remaining transport work includes explicit rate limiting, operational metrics, and broader fault-injection coverage. The receiver still only stores events; it does not apply world changes. It must not trust a peer merely because it can reach the TCP port.
+Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Remaining transport work includes explicit rate limiting, operational metrics, and broader fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
 
 Receivers acknowledge only after the event is durably accepted. Shared secrets must never be sent in plaintext. TLS with mutual authentication and explicit peer authorization is the selected baseline.
 
 ## Ordering and idempotency
 
+Each event includes a positive Lamport logical clock. Local events increment the node clock; accepting a remote event advances the clock beyond the remote value. The per-block winner is selected by the total order `(logicalClock, originServerId, originSequence)`. This makes the winner independent of network arrival order for a fixed set of events. Lamport clocks capture only causality a node has observed: events created independently during a partition can be concurrent, and the stable server-ID/sequence tie-breaker decides their winner. This is deterministic last-writer-wins, not consensus or real-time ordering.
+
+The inbox persists a winner per world coordinate. A stale event cannot replace a higher-ranked winner. Application rechecks the winner while holding the inbox lock, applies block data on the Paper main thread, and only then marks the event applied. If the process stops after the block mutation but before the status update, replay sets the same block data again. Only already-loaded chunks are eligible; unloaded chunks remain pending.
+
+## Ordering and idempotency
+
 - Event IDs are used to recognize retries.
-- Per-origin sequence numbers detect gaps from one node.
+- Per-origin sequence numbers provide uniqueness and origin-local identity. Explicit sequence-gap detection is not implemented yet.
 - A durable global commit offset (or a well-defined per-world partitioned log) establishes application order.
 - Replaying an already committed event must not apply it twice.
 - Receiver-side deduplication must survive process restarts. The inbound SQLite inbox currently enforces this for received block-edit events.

@@ -2,7 +2,7 @@
 
 ## Scope and security claims
 
-GlobalSync is experimental software. Peer networking is disabled by default. When explicitly enabled, this version exchanges a narrowly allowlisted set of block-edit events over authenticated TLS. Receivers durably acknowledge events; senders persist per-peer acknowledgement cursors. Received events are not applied to remote world state.
+GlobalSync is experimental software. Peer networking is disabled by default. When explicitly enabled, this version exchanges a narrowly allowlisted set of block-edit events over authenticated TLS. Receivers durably acknowledge events and persist deterministic per-block winners; senders persist per-peer acknowledgement cursors. Remote block application is a separate opt-in setting and is limited to player block placements and breaks.
 
 No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to make unauthorized behavior difficult to introduce, constrain the impact of a compromised node, and make releases auditable. A clean build or a passing test suite is not proof that source code is benign.
 
@@ -21,24 +21,18 @@ No plugin can guarantee that it is impossible to backdoor. GlobalSync aims to ma
 - The HELLO/READY handshake has a strict field allowlist, protocol-version check, and fresh nonce confirmation.
 - Inbound/outbound connection workers are bounded; handshake reads have timeouts; pending and active sockets are closed during shutdown.
 - Length-prefixed frames are bounded before payload allocation.
-- Post-handshake application data is restricted to version-1 `EVENT` messages for `BLOCK_PLACE` and `BLOCK_BREAK`; exact message and attribute field sets are enforced.
+- Post-handshake application data is restricted to version-2 `EVENT` messages for `BLOCK_PLACE` and `BLOCK_BREAK`; exact message and attribute field sets are enforced.
 - The claimed event origin must equal the authenticated peer ID, and the world must be in the configured shared-world allowlist.
 - Inbound events are stored in a separate SQLite inbox with WAL and FULL synchronous commits. Event IDs and origin sequences are unique; exact retries are idempotent and conflicting reuse is rejected.
-- An ACK is generated only after the inbox transaction commits. It confirms durable receipt, not application to the Minecraft world.
+- An ACK is generated only after the inbox and per-block winner transaction commits. It confirms durable receipt and winner selection, not application to the Minecraft world.
 - Outbound delivery uses one in-flight event per peer, a bounded sender worker, and a durable per-peer cursor that advances only for the exact event acknowledged.
 - ACKs are matched to the outstanding event ID. A timeout or disconnect closes the session; reconnect replay resumes from the durable cursor and relies on receiver deduplication if the original ACK was lost.
 - TLS private keys and store passwords must remain outside source control. Supply passwords through the configured environment variables.
 - The plugin has no supported remote command or arbitrary code execution feature.
 
-## Required controls before world application is enabled
+## Remote world-application limits
 
-Do not implement or enable remote world application until all of these exist and are reviewed:
-
-1. Per-peer rate limits and operational backpressure beyond the current one-event in-flight bound.
-2. Expanded fault-injection tests for lost ACKs, process crashes at each persistence boundary, prolonged partitions, and repeated reconnects.
-3. A safe application layer: received data must be marshalled onto the correct Paper thread and must never be applied without explicit world/event authorization and conflict handling.
-4. A documented certificate rotation and revocation procedure.
-5. Explicit authorization for each shared world and each event type; a valid TLS peer must not gain unrestricted world-write authority.
+Remote application is disabled by default with `application.enabled: false`. If deliberately enabled in a controlled test, only authenticated, schema-validated player block placements and breaks in configured shared worlds are eligible. The application service runs on the Paper main thread, does not force-load chunks, disables block physics, and rechecks the durable per-block winner immediately before mutation. The conflict order is Lamport clock, origin server ID, then origin sequence. This is deterministic last-writer-wins, not consensus; partitions can create concurrent edits whose winner is selected by the tie-breaker. Environmental changes, containers, block entities, and entity state are not replicated. Do not treat this milestone as production-ready.
 
 Never add remote console, command dispatch, class loading, scripting, plugin installation, arbitrary file access, or configuration mutation to the replication protocol.
 

@@ -6,7 +6,7 @@ The intended experience is that players connect to a nearby regional server whil
 
 ## Current status
 
-**This repository contains a 26.3 plugin foundation, a durable local event journal, initial player block-edit capture, and an opt-in authenticated peer layer with bidirectional durable event delivery. It is not yet a working multi-region world.**
+**This repository contains an experimental 26.3 shared-world foundation with durable player block-edit capture, authenticated bidirectional delivery, deterministic per-block conflict selection, and opt-in remote block application. It is not yet a complete multi-region world.**
 
 Implemented so far:
 
@@ -27,7 +27,10 @@ Implemented so far:
 - Client-side hostname verification and a strict HELLO/READY nonce handshake.
 - Bounded peer connection workers, handshake timeouts, and socket cleanup.
 - Bounded length-prefixed framing (1 MiB maximum).
-- Strict version-1 inbound `EVENT` allowlist for `BLOCK_PLACE` and `BLOCK_BREAK`.
+- Strict version-2 inbound `EVENT` allowlist for `BLOCK_PLACE` and `BLOCK_BREAK`.
+- Lamport logical clocks persisted with local and received events; concurrent edits use server ID and origin sequence as deterministic tie-breakers.
+- Durable per-block winner records and pending/applied/superseded inbox states.
+- Opt-in Paper-main-thread application of winning remote block edits, with no forced chunk loads and no physics side effects.
 - Authenticated origin and shared-world validation, with exact message and payload field sets.
 - Separate SQLite inbound inbox (`journal/received.db`) with durable deduplication by event ID and origin sequence.
 - Receiver ACKs only after the inbound inbox transaction commits.
@@ -36,19 +39,17 @@ Implemented so far:
 - Bounded exponential reconnect attempts; timed-out sends are retried and safely deduplicated by the receiver.
 - A status command and Maven/GitHub Actions verification workflow.
 
-Authenticated peers exchange allowlisted block-edit events in both directions. Each sender advances its durable per-peer cursor only after receiving an ACK for the exact event; the receiver sends that ACK only after committing the event to its inbox. A disconnect or lost ACK causes replay from the last persisted cursor. Received events are still not applied to the Minecraft world.
+Authenticated peers exchange allowlisted block-edit events in both directions. Each sender advances its durable per-peer cursor only after receiving an ACK for the exact event; the receiver sends that ACK only after committing the event and its per-block winner decision. A disconnect or lost ACK causes replay from the last persisted cursor. When `application.enabled` is enabled, winning remote edits are applied on Paper's main thread. Events for unloaded chunks remain pending and are retried when the chunk is loaded.
 
 Not implemented yet:
 
-- Applying durably received block changes on another server.
-- Rollback or compensation if a remote region disagrees with a local edit.
+- Capture of environmental changes, block entities, containers, and other non-player mutations.
+- Global consensus, partition fencing, and snapshot-based replica repair.
 - Heartbeat/liveness messages and peer health metrics.
-- Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
 - Chunk snapshots, entity simulation, and remote player rendering.
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
-- Global commit ordering, consensus, conflict resolution, or replica repair.
 
-Player block edits are journaled locally. Local block events are delivered to authenticated peers and acknowledged durably. Received events are stored in the inbox but are not applied to the world. Local journal offsets and received-inbox offsets are database-local, not global commit indexes.
+Player block edits are journaled locally and recorded in a durable per-block winner index. Event order is `(logicalClock, originServerId, originSequence)`: Lamport clocks preserve observed causal order; server ID and sequence break concurrent ties deterministically. This is deterministic last-writer-wins, not consensus. A partitioned node cannot know about edits it has not received, so conflicting writes during a partition may be resolved by the tie-breaker rather than real-world chronology. Local journal offsets and received-inbox offsets remain database-local, not global commit indexes.
 
 ## Requirements
 
@@ -76,10 +77,11 @@ The resulting plugin jar is in `target/`. GitHub Actions runs the same verificat
 5. Ensure the intended world names appear under `shared-worlds`.
 6. Leave `capture.player-block-changes: true` to journal player block edits, or set it to `false` to disable capture.
 7. Keep `network.enabled: false` unless you are deliberately testing authenticated peer replication between controlled nodes.
+8. Keep `application.enabled: false` until all peers run protocol v2 and you are testing against backed-up worlds. Enable it only on every node in the test topology.
 
 ### Controlled peer-replication testing
 
-The network layer is opt-in. It sends and receives allowlisted block-edit events with durable acknowledgements, but does not apply received changes to world state.
+The network and world-application layers are independently opt-in. The network sends and receives allowlisted block-edit events with durable acknowledgements. With `application.enabled: true`, winning edits are applied on the Paper main thread; unloaded chunks are not force-loaded.
 
 Before enabling it:
 
@@ -93,7 +95,7 @@ Before enabling it:
 
 Each pair uses the lexicographically lower server ID as the outbound dialer. Both nodes must authorize one another by ID and certificate fingerprint. Invalid certificates, unknown IDs, handshake failures, and excess connections are rejected. If the configuration or TLS stores are invalid, GlobalSync disables itself rather than starting with weaker security.
 
-**Do not expose this as a production replication network.** Remote world changes are not implemented. Remote commands, file access, plugin loading, and remote configuration changes are not part of the protocol. Keep networking disabled outside controlled replication tests.
+**Do not expose this as a production replication network.** This milestone only handles player placements and breaks; it does not capture environmental simulation, containers, block entities, or entity state. The Lamport ordering and tie-breaker provide deterministic conflict selection but do not provide consensus or partition fencing. Upgrade every peer to protocol v2 together. Remote commands, file access, plugin loading, and remote configuration changes are not part of the protocol. Keep networking and application disabled outside controlled tests.
 
 The local outgoing event database is stored at `plugins/GlobalSync/journal/events.db`; the durable inbound inbox is `plugins/GlobalSync/journal/received.db`. Back them up with the server stopped or by using a SQLite-aware backup method.
 

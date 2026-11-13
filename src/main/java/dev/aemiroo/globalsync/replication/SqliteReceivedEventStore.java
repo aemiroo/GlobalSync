@@ -11,8 +11,17 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
-/** Durable inbound-event inbox, kept separate from the local outgoing journal. */
+/**
+ * Durable inbound event inbox and deterministic per-block winner index.
+ * World mutation is deliberately performed by a separate Paper-main-thread service.
+ */
 public final class SqliteReceivedEventStore implements AutoCloseable {
     private final Connection connection;
 
@@ -34,63 +43,93 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
                         event_id TEXT NOT NULL UNIQUE,
                         origin_server_id TEXT NOT NULL,
                         origin_sequence INTEGER NOT NULL CHECK (origin_sequence > 0),
+                        logical_clock INTEGER NOT NULL CHECK (logical_clock > 0),
                         world_id TEXT NOT NULL,
                         payload_json TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
                         UNIQUE (origin_server_id, origin_sequence)
                     )
                     """);
+            ensureColumn("received_events", "logical_clock", "INTEGER NOT NULL DEFAULT 1");
+            // Existing v1 inbox rows were durably received but never applied. Do not
+            // reinterpret their old wire payload as a v2 world mutation.
+            ensureColumn("received_events", "status", "TEXT NOT NULL DEFAULT 'SUPERSEDED'");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS block_winners (
+                        world_id TEXT NOT NULL,
+                        x INTEGER NOT NULL,
+                        y INTEGER NOT NULL,
+                        z INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        logical_clock INTEGER NOT NULL,
+                        origin_server_id TEXT NOT NULL,
+                        origin_sequence INTEGER NOT NULL,
+                        block_data TEXT NOT NULL,
+                        PRIMARY KEY (world_id, x, y, z)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS lamport_state (
+                        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                        clock_value INTEGER NOT NULL CHECK (clock_value >= 0)
+                    )
+                    """);
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS local_journal_state (
+                        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                        indexed_offset INTEGER NOT NULL CHECK (indexed_offset >= 0)
+                    )
+                    """);
+            statement.execute("""
+                    INSERT OR IGNORE INTO local_journal_state(singleton_id, indexed_offset)
+                    VALUES (1, 0)
+                    """);
+            statement.execute("""
+                    INSERT OR IGNORE INTO lamport_state(singleton_id, clock_value)
+                    VALUES (1, 0)
+                    """);
+            statement.execute("""
+                    UPDATE lamport_state SET clock_value = MAX(clock_value,
+                        COALESCE((SELECT MAX(logical_clock) FROM received_events), 0))
+                    WHERE singleton_id = 1
+                    """);
+            migrateLegacyInboxRows();
         } catch (SQLException exception) {
             connection.close();
             throw exception;
         }
     }
 
-    /** Returns only after the inbound event is committed with FULL synchronous durability. */
+    /** Returns only after the inbound event and winner decision are durably committed. */
     public synchronized ReceivedEventReceipt accept(ReplicationEnvelope event) throws SQLException {
-        String payload = new String(ReplicationMessageCodec.encodeEvent(event), StandardCharsets.UTF_8);
+        return acceptInternal(event, false, 0);
+    }
+
+    /**
+     * Records a local event after Bukkit has already applied it. It remains
+     * pending until the application service confirms that it is still the winner
+     * and the live block matches its resulting data.
+     */
+    public synchronized ReceivedEventReceipt acceptLocal(ReplicationEnvelope event) throws SQLException {
+        return acceptInternal(event, true, 0);
+    }
+
+    /**
+     * Indexes one committed local journal row. The checkpoint and block winner
+     * are committed together so startup recovery only scans rows not yet indexed.
+     */
+    public synchronized void indexLocalJournalEntry(ReplicationEnvelope event, long localOffset)
+            throws SQLException {
+        if (localOffset < 1) throw new IllegalArgumentException("localOffset must be positive");
+        if (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(event.eventType())
+                || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(event.eventType())) {
+            acceptInternal(event, true, localOffset);
+            return;
+        }
         try {
             connection.setAutoCommit(false);
-            try (PreparedStatement query = connection.prepareStatement("""
-                    SELECT receipt_offset, payload_json FROM received_events
-                    WHERE event_id = ? OR (origin_server_id = ? AND origin_sequence = ?)
-                    LIMIT 1
-                    """)) {
-                query.setString(1, event.eventId().toString());
-                query.setString(2, event.originServerId());
-                query.setLong(3, event.sequence());
-                try (ResultSet result = query.executeQuery()) {
-                    if (result.next()) {
-                        long offset = result.getLong("receipt_offset");
-                        String existing = result.getString("payload_json");
-                        if (!existing.equals(payload)) {
-                            throw new JournalConflictException(
-                                    "Received event ID or origin sequence was reused for different data");
-                        }
-                        connection.commit();
-                        return new ReceivedEventReceipt(offset, true);
-                    }
-                }
-            }
-            try (PreparedStatement insert = connection.prepareStatement("""
-                    INSERT INTO received_events
-                    (event_id, origin_server_id, origin_sequence, world_id, payload_json)
-                    VALUES (?, ?, ?, ?, ?)
-                    """)) {
-                insert.setString(1, event.eventId().toString());
-                insert.setString(2, event.originServerId());
-                insert.setLong(3, event.sequence());
-                insert.setString(4, event.worldId());
-                insert.setString(5, payload);
-                insert.executeUpdate();
-            }
-            long offset;
-            try (Statement query = connection.createStatement();
-                 ResultSet result = query.executeQuery("SELECT last_insert_rowid()")) {
-                if (!result.next()) throw new SQLException("SQLite did not return received-event offset");
-                offset = result.getLong(1);
-            }
+            updateLocalJournalCheckpoint(localOffset);
             connection.commit();
-            return new ReceivedEventReceipt(offset, false);
         } catch (SQLException | RuntimeException exception) {
             try { connection.rollback(); } catch (SQLException rollbackFailure) {
                 exception.addSuppressed(rollbackFailure);
@@ -101,6 +140,157 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         }
     }
 
+    public synchronized long lastIndexedLocalJournalOffset() throws SQLException {
+        try (Statement query = connection.createStatement();
+             ResultSet result = query.executeQuery(
+                     "SELECT indexed_offset FROM local_journal_state WHERE singleton_id = 1")) {
+            return result.next() ? result.getLong(1) : 0L;
+        }
+    }
+
+    private ReceivedEventReceipt acceptInternal(ReplicationEnvelope event, boolean locallyApplied,
+                                                  long localOffset) throws SQLException {
+        String payload = new String(ReplicationMessageCodec.encodeEvent(event), StandardCharsets.UTF_8);
+        try {
+            connection.setAutoCommit(false);
+            try (PreparedStatement query = connection.prepareStatement("""
+                    SELECT receipt_offset, payload_json FROM received_events
+                    WHERE event_id = ? OR (origin_server_id = ? AND origin_sequence = ?)
+                    """)) {
+                query.setString(1, event.eventId().toString());
+                query.setString(2, event.originServerId());
+                query.setLong(3, event.sequence());
+                try (ResultSet result = query.executeQuery()) {
+                    Long duplicateOffset = null;
+                    while (result.next()) {
+                        if (!payload.equals(result.getString("payload_json")) || duplicateOffset != null) {
+                            throw new JournalConflictException(
+                                    "Received event ID or origin sequence was reused for different data");
+                        }
+                        duplicateOffset = result.getLong("receipt_offset");
+                    }
+                    if (duplicateOffset != null) {
+                        updateLamportClock(event.logicalClock());
+                        if (localOffset > 0) updateLocalJournalCheckpoint(localOffset);
+                        boolean apply = isPendingWinner(event.eventId());
+                        connection.commit();
+                        return new ReceivedEventReceipt(duplicateOffset, true, apply);
+                    }
+                }
+            }
+
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO received_events
+                    (event_id, origin_server_id, origin_sequence, logical_clock, world_id, payload_json, status)
+                    VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+                    """)) {
+                insert.setString(1, event.eventId().toString());
+                insert.setString(2, event.originServerId());
+                insert.setLong(3, event.sequence());
+                insert.setLong(4, event.logicalClock());
+                insert.setString(5, event.worldId());
+                insert.setString(6, payload);
+                insert.executeUpdate();
+            }
+
+            long offset;
+            try (Statement query = connection.createStatement();
+                 ResultSet result = query.executeQuery("SELECT last_insert_rowid()")) {
+                if (!result.next()) throw new SQLException("SQLite did not return received-event offset");
+                offset = result.getLong(1);
+            }
+
+            boolean winner = updateWinner(event);
+            if (!winner) {
+                setStatus(event.eventId(), "SUPERSEDED");
+            }
+            updateLamportClock(event.logicalClock());
+            if (localOffset > 0) updateLocalJournalCheckpoint(localOffset);
+            boolean apply = winner;
+            if (locallyApplied && !winner) {
+                apply = currentWinnerNeedsApplication(event);
+            }
+            connection.commit();
+            return new ReceivedEventReceipt(offset, false, apply);
+        } catch (SQLException | RuntimeException exception) {
+            try { connection.rollback(); } catch (SQLException rollbackFailure) {
+                exception.addSuppressed(rollbackFailure);
+            }
+            throw exception;
+        } finally {
+            try { connection.setAutoCommit(true); } catch (SQLException ignored) { }
+        }
+    }
+
+    /** Highest logical clock committed to this inbox, restored on startup. */
+    public synchronized long lastLogicalClock() throws SQLException {
+        try (Statement query = connection.createStatement();
+             ResultSet result = query.executeQuery(
+                     "SELECT clock_value FROM lamport_state WHERE singleton_id = 1")) {
+            return result.next() ? result.getLong(1) : 0L;
+        }
+    }
+
+    /** Returns pending winners in stable receipt order for startup/retry recovery. */
+    public synchronized List<ReplicationEnvelope> pendingWinners() throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT e.payload_json, e.origin_server_id, e.world_id
+                FROM received_events e
+                JOIN block_winners w ON w.event_id = e.event_id
+                WHERE e.status = 'PENDING'
+                ORDER BY e.receipt_offset ASC
+                """);
+             ResultSet result = query.executeQuery()) {
+            List<ReplicationEnvelope> events = new ArrayList<>();
+            while (result.next()) {
+                String world = result.getString("world_id");
+                events.add(ReplicationMessageCodec.decodeEvent(
+                        result.getString("payload_json").getBytes(StandardCharsets.UTF_8),
+                        result.getString("origin_server_id"), Set.of(world)));
+            }
+            return List.copyOf(events);
+        } catch (java.io.IOException exception) {
+            throw new SQLException("A stored pending event could not be decoded", exception);
+        }
+    }
+
+    /** Prevents a queued stale application task from overwriting a newer winner. */
+    public synchronized boolean isCurrentWinner(UUID eventId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT 1 FROM block_winners WHERE event_id = ?")) {
+            query.setString(1, eventId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+
+    /**
+     * Runs the Paper-thread mutation while holding the inbox lock, so a newer
+     * winner cannot be committed between the winner check and the world write.
+     * If the callback fails, the event remains pending for retry after restart.
+     */
+    public synchronized boolean applyCurrentWinner(UUID eventId, BooleanSupplier worldMutation) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM received_events e
+                JOIN block_winners w ON w.event_id = e.event_id
+                WHERE e.event_id = ? AND e.status = 'PENDING'
+                """)) {
+            query.setString(1, eventId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) return false;
+            }
+        }
+        if (!worldMutation.getAsBoolean()) return false;
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE received_events SET status = 'APPLIED' WHERE event_id = ? AND status = 'PENDING'")) {
+            update.setString(1, eventId.toString());
+            return update.executeUpdate() == 1;
+        }
+    }
+
+
     public synchronized long size() throws SQLException {
         try (Statement query = connection.createStatement();
              ResultSet result = query.executeQuery("SELECT COUNT(*) FROM received_events")) {
@@ -108,5 +298,207 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         }
     }
 
-    @Override public synchronized void close() throws SQLException { connection.close(); }
+
+    private void migrateLegacyInboxRows() throws SQLException {
+        List<ReplicationEnvelope> legacyEvents = new ArrayList<>();
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT payload_json FROM received_events
+                WHERE payload_json LIKE '%"protocolVersion":1%'
+                """);
+             ResultSet result = query.executeQuery()) {
+            while (result.next()) {
+                try {
+                    legacyEvents.add(ReplicationMessageCodec.decodeLegacyEvent(
+                            result.getString("payload_json").getBytes(StandardCharsets.UTF_8)));
+                } catch (java.io.IOException exception) {
+                    throw new SQLException("A legacy inbox event could not be migrated safely", exception);
+                }
+            }
+        }
+        if (legacyEvents.isEmpty()) return;
+
+        legacyEvents.sort(Comparator.comparingLong(ReplicationEnvelope::logicalClock)
+                .thenComparing(ReplicationEnvelope::originServerId)
+                .thenComparingLong(ReplicationEnvelope::sequence));
+
+        try {
+            connection.setAutoCommit(false);
+            for (ReplicationEnvelope event : legacyEvents) {
+                String payload = new String(ReplicationMessageCodec.encodeEvent(event), StandardCharsets.UTF_8);
+                try (PreparedStatement update = connection.prepareStatement("""
+                        UPDATE received_events
+                        SET logical_clock = ?, payload_json = ?, status = 'PENDING'
+                        WHERE event_id = ?
+                        """)) {
+                    update.setLong(1, event.logicalClock());
+                    update.setString(2, payload);
+                    update.setString(3, event.eventId().toString());
+                    update.executeUpdate();
+                }
+                if (!updateWinner(event)) setStatus(event.eventId(), "SUPERSEDED");
+                updateLamportClock(event.logicalClock());
+            }
+            connection.commit();
+        } catch (SQLException | RuntimeException exception) {
+            try { connection.rollback(); } catch (SQLException rollbackFailure) {
+                exception.addSuppressed(rollbackFailure);
+            }
+            throw exception;
+        } finally {
+            try { connection.setAutoCommit(true); } catch (SQLException ignored) { }
+        }
+    }
+
+    private boolean updateWinner(ReplicationEnvelope event) throws SQLException {
+        int x = Integer.parseInt(event.attributes().get("x"));
+        int y = Integer.parseInt(event.attributes().get("y"));
+        int z = Integer.parseInt(event.attributes().get("z"));
+        String previousId = null;
+        long previousClock = -1;
+        String previousOrigin = null;
+        long previousSequence = -1;
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT event_id, logical_clock, origin_server_id, origin_sequence
+                FROM block_winners WHERE world_id = ? AND x = ? AND y = ? AND z = ?
+                """)) {
+            query.setString(1, event.worldId());
+            query.setInt(2, x);
+            query.setInt(3, y);
+            query.setInt(4, z);
+            try (ResultSet result = query.executeQuery()) {
+                if (result.next()) {
+                    previousId = result.getString("event_id");
+                    previousClock = result.getLong("logical_clock");
+                    previousOrigin = result.getString("origin_server_id");
+                    previousSequence = result.getLong("origin_sequence");
+                }
+            }
+        }
+
+        if (previousId != null && compareOrder(event.logicalClock(), event.originServerId(),
+                event.sequence(), previousClock, previousOrigin, previousSequence) <= 0) {
+            return previousId.equals(event.eventId().toString());
+        }
+
+        if (previousId != null) setStatus(UUID.fromString(previousId), "SUPERSEDED");
+        try (PreparedStatement upsert = connection.prepareStatement("""
+                INSERT INTO block_winners
+                    (world_id, x, y, z, event_id, logical_clock, origin_server_id, origin_sequence, block_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(world_id, x, y, z) DO UPDATE SET
+                    event_id = excluded.event_id,
+                    logical_clock = excluded.logical_clock,
+                    origin_server_id = excluded.origin_server_id,
+                    origin_sequence = excluded.origin_sequence,
+                    block_data = excluded.block_data
+                """)) {
+            upsert.setString(1, event.worldId());
+            upsert.setInt(2, x);
+            upsert.setInt(3, y);
+            upsert.setInt(4, z);
+            upsert.setString(5, event.eventId().toString());
+            upsert.setLong(6, event.logicalClock());
+            upsert.setString(7, event.originServerId());
+            upsert.setLong(8, event.sequence());
+            upsert.setString(9, event.attributes().get("new_block_data"));
+            upsert.executeUpdate();
+        }
+        return true;
+    }
+
+    private static int compareOrder(long clockA, String originA, long sequenceA,
+                                    long clockB, String originB, long sequenceB) {
+        int clock = Long.compare(clockA, clockB);
+        if (clock != 0) return clock;
+        int origin = originA.compareTo(originB);
+        if (origin != 0) return origin;
+        return Long.compare(sequenceA, sequenceB);
+    }
+
+    private boolean currentWinnerNeedsApplication(ReplicationEnvelope event) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT e.status FROM block_winners w
+                JOIN received_events e ON e.event_id = w.event_id
+                WHERE w.world_id = ? AND w.x = ? AND w.y = ? AND w.z = ?
+                """)) {
+            query.setString(1, event.worldId());
+            query.setInt(2, Integer.parseInt(event.attributes().get("x")));
+            query.setInt(3, Integer.parseInt(event.attributes().get("y")));
+            query.setInt(4, Integer.parseInt(event.attributes().get("z")));
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() && "PENDING".equals(result.getString(1));
+            }
+        }
+    }
+
+    private boolean isPendingWinner(UUID eventId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM received_events e
+                JOIN block_winners w ON w.event_id = e.event_id
+                WHERE e.event_id = ? AND e.status = 'PENDING'
+                """)) {
+            query.setString(1, eventId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+    private void setStatus(UUID eventId, String status) throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE received_events SET status = ? WHERE event_id = ?")) {
+            update.setString(1, status);
+            update.setString(2, eventId.toString());
+            update.executeUpdate();
+        }
+    }
+
+
+    private void updateLocalJournalCheckpoint(long localOffset) throws SQLException {
+        long current = lastIndexedLocalJournalOffset();
+        if (localOffset < current) {
+            throw new SQLException("Local journal index checkpoint cannot move backwards");
+        }
+        if (localOffset == current) return;
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE local_journal_state SET indexed_offset = ?
+                WHERE singleton_id = 1
+                """)) {
+            update.setLong(1, localOffset);
+            update.executeUpdate();
+        }
+    }
+
+    private void updateLamportClock(long remoteClock) throws SQLException {
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE lamport_state SET clock_value = MAX(clock_value, ?)
+                WHERE singleton_id = 1
+                """)) {
+            update.setLong(1, remoteClock);
+            update.executeUpdate();
+        }
+    }
+
+    private void ensureColumn(String table, String column, String declaration) throws SQLException {
+        boolean present = false;
+        try (Statement query = connection.createStatement();
+             ResultSet result = query.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (result.next()) {
+                if (column.equalsIgnoreCase(result.getString("name"))) {
+                    present = true;
+                    break;
+                }
+            }
+        }
+        if (!present) {
+            try (Statement alter = connection.createStatement()) {
+                alter.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + declaration);
+            }
+        }
+    }
+
+    @Override
+    public synchronized void close() throws SQLException {
+        connection.close();
+    }
 }

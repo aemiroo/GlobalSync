@@ -19,6 +19,8 @@ import java.util.UUID;
 /** Strict JSON message allowlist for the first replication protocol version. */
 public final class ReplicationMessageCodec {
     private static final Set<String> EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
+            "worldId", "originServerId", "sequence", "logicalClock", "createdAt", "eventType", "attributes");
+    private static final Set<String> LEGACY_EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
             "worldId", "originServerId", "sequence", "createdAt", "eventType", "attributes");
     private static final Set<String> ACK_FIELDS = Set.of("type", "protocolVersion", "eventId", "journalOffset");
     private static final Set<String> BLOCK_ATTRIBUTES = Set.of("player_uuid", "x", "y", "z",
@@ -34,6 +36,7 @@ public final class ReplicationMessageCodec {
         json.addProperty("worldId", event.worldId());
         json.addProperty("originServerId", event.originServerId());
         json.addProperty("sequence", event.sequence());
+        json.addProperty("logicalClock", event.logicalClock());
         json.addProperty("createdAt", event.createdAt().toString());
         json.addProperty("eventType", event.eventType());
         JsonObject attrs = new JsonObject();
@@ -46,7 +49,7 @@ public final class ReplicationMessageCodec {
                                                    Set<String> sharedWorlds) throws IOException {
         JsonObject json = parse(payload);
         requireFields(json, EVENT_FIELDS);
-        if (!"EVENT".equals(string(json, "type")) || integer(json, "protocolVersion") != 1)
+        if (!"EVENT".equals(string(json, "type")) || integer(json, "protocolVersion") != 2)
             throw new IOException("Unsupported replication message type or protocol version");
         String origin = string(json, "originServerId");
         if (!origin.equals(authenticatedPeerId))
@@ -76,8 +79,9 @@ public final class ReplicationMessageCodec {
         if ("BLOCK_PLACE".equals(eventType) && "minecraft:air".equals(next))
             throw new IOException("BLOCK_PLACE cannot result in minecraft:air");
         try {
-            return new ReplicationEnvelope(1, UUID.fromString(string(json, "eventId")), world, origin,
-                    longInteger(json, "sequence"), Instant.parse(string(json, "createdAt")), eventType,
+            return new ReplicationEnvelope(2, UUID.fromString(string(json, "eventId")), world, origin,
+                    longInteger(json, "sequence"), checkedRemoteLogicalClock(json),
+                    Instant.parse(string(json, "createdAt")), eventType,
                     Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
                             "z", Integer.toString(z), "previous_block_data", previous, "new_block_data", next));
         } catch (RuntimeException exception) {
@@ -85,10 +89,65 @@ public final class ReplicationMessageCodec {
         }
     }
 
+
+    /**
+     * Converts a previously accepted v1 inbox row into the v2 envelope.
+     * Legacy events had no Lamport clock, so origin sequence is used as a
+     * deterministic migration seed; it cannot reconstruct lost cross-node causality.
+     */
+    public static ReplicationEnvelope decodeLegacyEvent(byte[] payload) throws IOException {
+        JsonObject json = parse(payload);
+        requireFields(json, LEGACY_EVENT_FIELDS);
+        if (!"EVENT".equals(string(json, "type")) || integer(json, "protocolVersion") != 1)
+            throw new IOException("Stored event is not a legacy protocol-v1 EVENT");
+        String eventType = string(json, "eventType");
+        if (!"BLOCK_PLACE".equals(eventType) && !"BLOCK_BREAK".equals(eventType))
+            throw new IOException("Legacy event type is not eligible for migration");
+        JsonElement attrsElement = json.get("attributes");
+        if (attrsElement == null || !attrsElement.isJsonObject())
+            throw new IOException("Legacy event attributes must be an object");
+        JsonObject attrs = attrsElement.getAsJsonObject();
+        requireFields(attrs, BLOCK_ATTRIBUTES);
+        String player = string(attrs, "player_uuid");
+        try {
+            if (!UUID.fromString(player).toString().equalsIgnoreCase(player)) throw new IllegalArgumentException();
+        } catch (IllegalArgumentException exception) {
+            throw new IOException("Invalid legacy player UUID", exception);
+        }
+        int x = integerText(attrs, "x"), y = integerText(attrs, "y"), z = integerText(attrs, "z");
+        String previous = boundedText(attrs, "previous_block_data", 512);
+        String next = boundedText(attrs, "new_block_data", 512);
+        if ("BLOCK_BREAK".equals(eventType) && !"minecraft:air".equals(next))
+            throw new IOException("Legacy BLOCK_BREAK must result in minecraft:air");
+        if ("BLOCK_PLACE".equals(eventType) && "minecraft:air".equals(next))
+            throw new IOException("Legacy BLOCK_PLACE cannot result in minecraft:air");
+        try {
+            long sequence = longInteger(json, "sequence");
+            return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION,
+                    UUID.fromString(string(json, "eventId")), string(json, "worldId"),
+                    string(json, "originServerId"), sequence,
+                    Math.min(sequence, dev.aemiroo.globalsync.replication.LogicalClock.MAX_REMOTE_VALUE),
+                    Instant.parse(string(json, "createdAt")), eventType,
+                    Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
+                            "z", Integer.toString(z), "previous_block_data", previous,
+                            "new_block_data", next));
+        } catch (RuntimeException exception) {
+            throw new IOException("Invalid legacy replication envelope", exception);
+        }
+    }
+
+
+    private static long checkedRemoteLogicalClock(JsonObject json) throws IOException {
+        long clock = longInteger(json, "logicalClock");
+        if (clock < 1 || clock > dev.aemiroo.globalsync.replication.LogicalClock.MAX_REMOTE_VALUE)
+            throw new IOException("Remote logical clock is outside the accepted range");
+        return clock;
+    }
+
     public static byte[] encodeAck(UUID eventId, long journalOffset) {
         JsonObject ack = new JsonObject();
         ack.addProperty("type", "ACK");
-        ack.addProperty("protocolVersion", 1);
+        ack.addProperty("protocolVersion", 2);
         ack.addProperty("eventId", eventId.toString());
         ack.addProperty("journalOffset", journalOffset);
         return ack.toString().getBytes(StandardCharsets.UTF_8);
@@ -104,7 +163,7 @@ public final class ReplicationMessageCodec {
     public static ReplicationAcknowledgement decodeAck(byte[] payload, UUID expectedEventId) throws IOException {
         JsonObject json = parse(payload);
         requireFields(json, ACK_FIELDS);
-        if (!"ACK".equals(string(json, "type")) || integer(json, "protocolVersion") != 1
+        if (!"ACK".equals(string(json, "type")) || integer(json, "protocolVersion") != 2
                 || !expectedEventId.toString().equals(string(json, "eventId"))
                 || longInteger(json, "journalOffset") < 1)
             throw new IOException("Invalid replication acknowledgement");

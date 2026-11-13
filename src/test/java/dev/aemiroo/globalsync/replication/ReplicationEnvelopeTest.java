@@ -12,7 +12,7 @@ class ReplicationEnvelopeTest {
     @Test
     void validatesAndCopiesEnvelopeAttributes() {
         var envelope = new ReplicationEnvelope(
-                1, UUID.randomUUID(), "overworld", "asia", 1,
+                ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.randomUUID(), "overworld", "asia", 1,
                 Instant.now(), "BLOCK_CHANGE", Map.of("block", "minecraft:stone")
         );
         assertEquals("overworld", envelope.worldId());
