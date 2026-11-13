@@ -291,6 +291,24 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         }
     }
 
+
+    /**
+     * Reconciles a local edit that Paper already applied before its asynchronous
+     * journal/index commit. It may run for an APPLIED event, but never for a
+     * superseded event; the lock closes the race with a newer winner commit.
+     */
+    public synchronized boolean reconcileCurrentWinner(UUID eventId, BooleanSupplier worldMutation)
+            throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement(
+                "SELECT 1 FROM block_winners WHERE event_id = ?")) {
+            query.setString(1, eventId.toString());
+            try (ResultSet result = query.executeQuery()) {
+                if (!result.next()) return false;
+            }
+        }
+        return worldMutation.getAsBoolean();
+    }
+
     /** Marks an event applied only if it is still the durable winner for its block. */
     public synchronized boolean markApplied(UUID eventId) throws SQLException {
         try (PreparedStatement update = connection.prepareStatement("""
