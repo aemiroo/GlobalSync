@@ -331,6 +331,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         PendingGapRequest pending = new PendingGapRequest(UUID.randomUUID(), missing, System.nanoTime(), 0);
         if (!session.pendingGapRequest.compareAndSet(null, pending)) return;
         try {
+            messageHandler.markGapRequested(session.peerId, missing);
             session.write(GapRepairMessage.encodeRequest(pending.requestId, session.peerId, missing));
             logger.info("Requested missing event " + session.peerId + "#" + missing);
         } catch (IOException exception) {
@@ -368,6 +369,7 @@ public final class PeerConnectionManager implements AutoCloseable {
                     || !session.peerId.equals(message.originServerId())
                     || pending.sequence != message.sequence())
                 throw new IOException("Unsolicited or mismatched gap-unavailable response");
+            messageHandler.markGapUnavailable(session.peerId, pending.sequence);
             session.pendingGapRequest.compareAndSet(pending, null);
             logger.warning("Peer " + session.peerId + " no longer retains event " + pending.sequence
                     + "; sequence gap requires operator-assisted recovery");
@@ -437,6 +439,7 @@ public final class PeerConnectionManager implements AutoCloseable {
                 now, pending.retries + 1);
         if (!session.pendingGapRequest.compareAndSet(pending, retry)) return;
         try {
+            messageHandler.markGapRequested(session.peerId, retry.sequence);
             session.write(GapRepairMessage.encodeRequest(retry.requestId, session.peerId, retry.sequence));
         } catch (IOException exception) {
             session.close();
