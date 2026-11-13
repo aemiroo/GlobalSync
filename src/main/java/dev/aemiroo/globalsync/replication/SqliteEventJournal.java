@@ -86,7 +86,7 @@ public final class SqliteEventJournal implements AutoCloseable {
         String sql = """
                 INSERT INTO events (
                     event_id, world_id, origin_server_id, origin_sequence, logical_clock,
-                    logical_clock, protocol_version, created_at, event_type, attributes_json
+                    protocol_version, created_at, event_type, attributes_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
 
