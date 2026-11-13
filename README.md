@@ -46,10 +46,8 @@ Not implemented yet:
 - Capture of environmental changes, block entities, containers, and other non-player mutations.
 - Global consensus, partition fencing, and snapshot-based replica repair.
 - Heartbeat/liveness messages and peer health metrics.
-- Capture of explosions, pistons, fluids, redstone, growth, containers, block entities, or other non-player world changes.
 - Chunk snapshots, entity simulation, and remote player rendering.
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
-- Global consensus and authoritative commit ordering across network partitions.
 
 Player block edits are journaled locally and recorded in a durable per-block winner index. Event order is `(logicalClock, originServerId, originSequence)`: Lamport clocks preserve observed causal order; server ID and sequence break concurrent ties deterministically. This is deterministic last-writer-wins, not consensus. A partitioned node cannot know about edits it has not received, so conflicting writes during a partition may be resolved by the tie-breaker rather than real-world chronology. Local journal offsets and received-inbox offsets remain database-local, not global commit indexes.
 
