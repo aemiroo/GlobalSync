@@ -36,8 +36,8 @@ class ReplicationMessageCodecWorldSequenceTest {
                         "previous_block_data", "minecraft:air", "new_block_data", "minecraft:stone"));
         String previous = new String(ReplicationMessageCodec.encodeEvent(event),
                 java.nio.charset.StandardCharsets.UTF_8)
-                .replace(",\\"worldSequence\\":7", "")
-                .replace("\\"protocolVersion\\":3", "\\"protocolVersion\\":2");
+                .replace(",\"worldSequence\":7", "")
+                .replace("\"protocolVersion\":3", "\"protocolVersion\":2");
 
         ReplicationEnvelope decoded = ReplicationMessageCodec.decodeEvent(
                 previous.getBytes(java.nio.charset.StandardCharsets.UTF_8), "asia", Set.of("overworld"));
