@@ -55,7 +55,7 @@ class SqliteReceivedEventStoreTest {
             assertFalse(store.applyCurrentWinner(causallyLater.eventId(), () -> false));
             assertEquals(1, store.pendingWinners().size());
             assertTrue(store.applyCurrentWinner(causallyLater.eventId(), () -> { mutations.incrementAndGet(); return true; }));
-            assertFalse(store.applyCurrentWinner(causallyLater.eventId(), mutations::incrementAndGet));
+            assertFalse(store.applyCurrentWinner(causallyLater.eventId(), () -> { mutations.incrementAndGet(); return true; }));
             assertEquals(1, mutations.get());
             assertTrue(store.pendingWinners().isEmpty());
         }
