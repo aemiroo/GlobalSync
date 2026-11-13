@@ -55,6 +55,9 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
             // Existing v1 inbox rows were durably received but never applied. Do not
             // reinterpret their old wire payload as a v2 world mutation.
             ensureColumn("received_events", "status", "TEXT NOT NULL DEFAULT 'SUPERSEDED'");
+            // Old inbox rows have no trustworthy world-local sequence. Zero is
+            // deliberately excluded from snapshot coverage rather than guessed.
+            ensureColumn("received_events", "world_sequence", "INTEGER NOT NULL DEFAULT 0");
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS block_winners (
                         world_id TEXT NOT NULL,
@@ -194,15 +197,16 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
 
             try (PreparedStatement insert = connection.prepareStatement("""
                     INSERT INTO received_events
-                    (event_id, origin_server_id, origin_sequence, logical_clock, world_id, payload_json, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+                    (event_id, origin_server_id, origin_sequence, world_sequence, logical_clock, world_id, payload_json, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
                     """)) {
                 insert.setString(1, event.eventId().toString());
                 insert.setString(2, event.originServerId());
                 insert.setLong(3, event.sequence());
-                insert.setLong(4, event.logicalClock());
-                insert.setString(5, event.worldId());
-                insert.setString(6, payload);
+                insert.setLong(4, event.worldSequence());
+                insert.setLong(5, event.logicalClock());
+                insert.setString(6, event.worldId());
+                insert.setString(7, payload);
                 insert.executeUpdate();
             }
 
@@ -304,6 +308,62 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         }
     }
 
+
+    /**
+     * Returns contiguous, durably applied world-local sequence coverage for
+     * each (world, origin) pair. Legacy rows with world_sequence=0 and events
+     * that are merely received or superseded are never counted as applied.
+     *
+     * A zero contiguous sequence means no positive world-local event from that
+     * origin is yet proven applied in that world.
+     */
+    public synchronized List<WorldAppliedSequenceProgress> worldAppliedSequenceProgress()
+            throws SQLException {
+        List<WorldAppliedSequenceProgress> progress = new ArrayList<>();
+        try (Statement origins = connection.createStatement();
+             ResultSet groups = origins.executeQuery("""
+                     SELECT world_id, origin_server_id, COUNT(*) AS applied_count,
+                            MAX(world_sequence) AS highest_sequence
+                     FROM received_events
+                     WHERE status = 'APPLIED' AND world_sequence > 0
+                     GROUP BY world_id, origin_server_id
+                     ORDER BY world_id, origin_server_id
+                     """)) {
+            while (groups.next()) {
+                String world = groups.getString("world_id");
+                String origin = groups.getString("origin_server_id");
+                long count = groups.getLong("applied_count");
+                long highest = groups.getLong("highest_sequence");
+                long contiguous = 0L;
+                if (count >= highest) {
+                    contiguous = highest;
+                } else {
+                    long expected = 1L;
+                    try (PreparedStatement sequences = connection.prepareStatement("""
+                            SELECT world_sequence FROM received_events
+                            WHERE world_id = ? AND origin_server_id = ?
+                              AND status = 'APPLIED' AND world_sequence > 0
+                            ORDER BY world_sequence ASC
+                            """)) {
+                        sequences.setString(1, world);
+                        sequences.setString(2, origin);
+                        try (ResultSet rows = sequences.executeQuery()) {
+                            while (rows.next()) {
+                                long sequence = rows.getLong(1);
+                                if (sequence < expected) continue;
+                                if (sequence != expected) break;
+                                contiguous = expected;
+                                expected++;
+                            }
+                        }
+                    }
+                }
+                progress.add(new WorldAppliedSequenceProgress(
+                        world, origin, contiguous, highest, count));
+            }
+        }
+        return List.copyOf(progress);
+    }
 
     public synchronized long size() throws SQLException {
         try (Statement query = connection.createStatement();
