@@ -112,3 +112,10 @@ The inbound SQLite store persists each event's world-local sequence separately f
 Coverage is reported independently for each `(world_id, origin_server_id)` pair. The contiguous watermark advances only across a gap-free prefix beginning at world-local sequence 1; received, pending, and superseded events do not advance it. The store enforces uniqueness of positive world-local sequence values within each world and origin.
 
 Rows created before this migration receive `world_sequence = 0`. Their historical world-local order cannot be reconstructed safely from the global delivery sequence, so they are deliberately excluded from snapshot coverage. A zero watermark means no positive sequence prefix is proven applied. This conservative rule may delay snapshot eligibility, but it avoids claiming coverage for changes that may not exist in the live world.
+
+
+## Incremental loaded-chunk capture primitive
+
+The capture foundation provides a main-thread coordinator that inventories already-loaded chunks once, sorts them deterministically by chunk X/Z, and samples at most a configured number per tick (hard-capped at eight). It does not force-load or generate chunks. A chunk that unloads after inventory is skipped. The callback receives an immutable Bukkit `ChunkSnapshot` and must enqueue or copy it quickly; expensive encoding and disk I/O belong on a worker thread.
+
+**This primitive does not produce a publishable snapshot.** Chunks are sampled across multiple ticks, so edits can occur between chunk samples. Its output must not be assigned a single world-wide applied-through vector, written as a completed manifest, transferred, or installed until the consistency/reconciliation protocol is implemented. The current block-data payload format also remains limited to block coordinates and canonical block data; it does not include block entities, inventories, entities, or biome data.
