@@ -72,6 +72,22 @@ class SqliteReceivedEventStoreTest {
         }
     }
 
+
+    @Test
+    void pendingRemoteWinnerSurvivesInboxRestart() throws Exception {
+        Path database = directory.resolve("pending.db");
+        ReplicationEnvelope remote = event("region-remote", 4, 41, "minecraft:glass");
+        try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(database)) {
+            assertTrue(store.accept(remote).applyRequired());
+            assertEquals(41, store.lastLogicalClock());
+        }
+        try (SqliteReceivedEventStore recovered = new SqliteReceivedEventStore(database)) {
+            assertEquals(41, recovered.lastLogicalClock());
+            assertEquals(List.of(remote.eventId()),
+                    recovered.pendingWinners().stream().map(ReplicationEnvelope::eventId).toList());
+        }
+    }
+
     @Test
     void exactRetriesRemainIdempotentAndConflictingReuseIsRejected() throws Exception {
         try (SqliteReceivedEventStore store = new SqliteReceivedEventStore(directory.resolve("retry.db"))) {
