@@ -60,6 +60,37 @@ class SqliteEventJournalTest {
     }
 
     @Test
+    void reportsPerPeerBacklogAndOldestPendingEventWithoutUsingRemoteOffsetsAsLocalCursors() throws Exception {
+        try (SqliteEventJournal journal = new SqliteEventJournal(temporaryDirectory.resolve("progress/events.db"))) {
+            ReplicationEnvelope first = event(UUID.randomUUID(), "asia", 1, "BLOCK_PLACE");
+            ReplicationEnvelope second = event(UUID.randomUUID(), "asia", 2, "BLOCK_BREAK");
+            long firstOffset = journal.append(first);
+            long secondOffset = journal.append(second);
+
+            PeerReplicationProgress disconnected = journal.peerProgress("europe", false, 0);
+            assertEquals("DISCONNECTED", disconnected.state());
+            assertEquals(2, disconnected.pendingEvents());
+            assertEquals(0, disconnected.acknowledgedOffset());
+            assertEquals(2, disconnected.journalHeadOffset());
+            assertEquals(first.createdAt(), disconnected.oldestPendingAt());
+
+            journal.acknowledge("europe", new JournalEntry(firstOffset, first), 50);
+            PeerReplicationProgress catchingUp = journal.peerProgress("europe", true, 3);
+            assertEquals("CATCHING_UP", catchingUp.state());
+            assertEquals(1, catchingUp.pendingEvents());
+            assertEquals(firstOffset, catchingUp.acknowledgedOffset());
+            assertEquals(secondOffset, catchingUp.journalHeadOffset());
+            assertEquals(3, catchingUp.heartbeatPongs());
+
+            journal.acknowledge("europe", new JournalEntry(secondOffset, second), 51);
+            PeerReplicationProgress current = journal.peerProgress("europe", true, 4);
+            assertEquals("CURRENT", current.state());
+            assertEquals(0, current.pendingEvents());
+            assertNull(current.oldestPendingAt());
+        }
+    }
+
+    @Test
     void rejectsInvalidReplayBounds() throws Exception {
         try (SqliteEventJournal journal = new SqliteEventJournal(temporaryDirectory.resolve("events.db"))) {
             assertThrows(IllegalArgumentException.class, () -> journal.readAfter(-1, 10));
