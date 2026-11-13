@@ -106,7 +106,7 @@ public final class ReplicationMessageCodec {
     public static ReplicationAcknowledgement decodeAck(byte[] payload, UUID expectedEventId) throws IOException {
         JsonObject json = parse(payload);
         requireFields(json, ACK_FIELDS);
-        if (!"ACK".equals(string(json, "type")) || integer(json, "protocolVersion") != 1
+        if (!"ACK".equals(string(json, "type")) || integer(json, "protocolVersion") != 2
                 || !expectedEventId.toString().equals(string(json, "eventId"))
                 || longInteger(json, "journalOffset") < 1)
             throw new IOException("Invalid replication acknowledgement");
