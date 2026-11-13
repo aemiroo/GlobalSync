@@ -47,6 +47,7 @@ public final class SnapshotStagingStore implements AutoCloseable {
     public SnapshotStagingStore(Path directory) throws IOException, SQLException {
         Objects.requireNonNull(directory, "directory");
         Path requested = directory.toAbsolutePath().normalize();
+        rejectSymlinkComponents(requested);
         Files.createDirectories(requested);
         if (Files.isSymbolicLink(requested) || !Files.isDirectory(requested, LinkOption.NOFOLLOW_LINKS))
             throw new IOException("Snapshot staging root must be a real directory, not a symbolic link");
@@ -108,12 +109,14 @@ public final class SnapshotStagingStore implements AutoCloseable {
                 try (FileChannel channel = openFile(file, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
                     if (channel.size() < existing.receivedBytes)
                         throw new IOException("Staged snapshot is shorter than its durable progress record");
-                    if (channel.size() > existing.receivedBytes) {
+                    if ("RECEIVING".equals(existing.state) && channel.size() > existing.receivedBytes) {
                         channel.truncate(existing.receivedBytes);
                         channel.force(true);
                     }
                 }
-                return new BeginResult(existing.nextChunk, "COMPLETE".equals(existing.state));
+                boolean complete = "COMPLETE".equals(existing.state);
+                if (complete) verifyCompletedFile(file, manifest);
+                return new BeginResult(existing.nextChunk, complete);
             }
 
             if (countActive() >= MAX_ACTIVE_TRANSFERS)
@@ -252,7 +255,8 @@ public final class SnapshotStagingStore implements AutoCloseable {
     private void recoverIncompleteFiles() throws IOException, SQLException {
         Set<String> retained = new java.util.HashSet<>();
         try (Statement query = connection.createStatement();
-             ResultSet rows = query.executeQuery("SELECT snapshot_id,received_bytes,state FROM staged_snapshots")) {
+             ResultSet rows = query.executeQuery(
+                     "SELECT snapshot_id,received_bytes,state,manifest FROM staged_snapshots")) {
             while (rows.next()) {
                 String id = rows.getString(1);
                 retained.add(id + ".part");
@@ -267,6 +271,10 @@ public final class SnapshotStagingStore implements AutoCloseable {
                         channel.truncate(committed);
                         channel.force(true);
                     }
+                }
+                if ("COMPLETE".equals(rows.getString(3))) {
+                    SnapshotManifest manifest = SnapshotManifestCodec.decode(rows.getBytes(4));
+                    verifyCompletedFile(file, manifest);
                 }
             }
         }
@@ -357,6 +365,25 @@ public final class SnapshotStagingStore implements AutoCloseable {
         Set<OpenOption> safe = new java.util.HashSet<>(Set.of(options));
         safe.add(LinkOption.NOFOLLOW_LINKS);
         return FileChannel.open(file, safe);
+    }
+
+    private static void verifyCompletedFile(Path file, SnapshotManifest manifest) throws IOException {
+        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
+                || Files.size(file) != manifest.contentLengthBytes())
+            throw new IOException("Completed staged snapshot has an invalid file length or type");
+        byte[] actual = HexFormat.of().parseHex(sha256(file));
+        byte[] expected = HexFormat.of().parseHex(manifest.contentSha256());
+        if (!MessageDigest.isEqual(actual, expected))
+            throw new IOException("Completed staged snapshot failed SHA-256 revalidation");
+    }
+
+    private static void rejectSymlinkComponents(Path absolutePath) throws IOException {
+        Path current = absolutePath.getRoot();
+        for (Path component : absolutePath) {
+            current = current.resolve(component);
+            if (Files.exists(current, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(current))
+                throw new IOException("Snapshot staging path contains a symbolic link");
+        }
     }
 
     private static String sha256(Path file) throws IOException {
