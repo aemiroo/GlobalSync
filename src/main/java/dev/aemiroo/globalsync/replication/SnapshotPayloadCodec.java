@@ -152,7 +152,7 @@ public final class SnapshotPayloadCodec {
     }
 
     private static boolean isValidBlockData(String value) {
-        return value.matches("[a-z0-9_.:/-]+(?:\\\\[[a-z0-9_.:/,=-]+\\\\])?");
+        return value.matches("[a-z0-9_.:/-]+(?:\\[[a-z0-9_.:/,=-]+\\])?");
     }
 
     private static String decodeStrict(byte[] bytes) throws IOException {
