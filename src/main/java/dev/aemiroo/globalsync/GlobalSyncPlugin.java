@@ -16,6 +16,7 @@ import dev.aemiroo.globalsync.replication.GapRecoveryProgress;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
+import dev.aemiroo.globalsync.replication.WorldSequenceClock;
 import dev.aemiroo.globalsync.replication.SqliteEventJournal;
 import dev.aemiroo.globalsync.replication.SqliteReceivedEventStore;
 import org.bukkit.Bukkit;
@@ -47,6 +48,7 @@ import java.util.logging.Level;
 
 public final class GlobalSyncPlugin extends JavaPlugin {
     private SequenceClock sequenceClock;
+    private WorldSequenceClock worldSequenceClock;
     private LogicalClock logicalClock;
     private BlockApplicationService blockApplicationService;
     private EventDeduplicator eventDeduplicator;
@@ -88,6 +90,11 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             Path receivedPath = journalPath.getParent().resolve("received.db");
             receivedEventStore = new SqliteReceivedEventStore(receivedPath);
             sequenceClock = new SequenceClock(eventJournal.lastSequence(serverId));
+            java.util.Map<String, Long> worldSequences = new java.util.HashMap<>();
+            for (String world : sharedWorlds) {
+                worldSequences.put(world, eventJournal.lastWorldSequence(serverId, world));
+            }
+            worldSequenceClock = new WorldSequenceClock(worldSequences);
             logicalClock = new LogicalClock(Math.max(
                     eventJournal.lastLogicalClock(), receivedEventStore.lastLogicalClock()));
             restoreLocalWinnerIndex();
@@ -218,6 +225,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 worldId,
                 serverId,
                 sequenceClock.next(),
+                worldSequenceClock.next(worldId),
                 logicalClock.tick(),
                 playerId,
                 x,

@@ -172,4 +172,24 @@ class SqliteEventJournalTest {
                 Map.of("block", "minecraft:stone")
         );
     }
+
+    @Test
+    void restoresWorldSequencesIndependentlyFromTheGlobalOriginSequence() throws Exception {
+        Path database = temporaryDirectory.resolve("world-sequences/events.db");
+        ReplicationEnvelope overworld = new ReplicationEnvelope(3, UUID.randomUUID(), "overworld", "asia",
+                10, 4, 10, Instant.now(), "BLOCK_PLACE", Map.of("block", "minecraft:stone"));
+        ReplicationEnvelope nether = new ReplicationEnvelope(3, UUID.randomUUID(), "nether", "asia",
+                11, 2, 11, Instant.now(), "BLOCK_PLACE", Map.of("block", "minecraft:netherrack"));
+
+        try (SqliteEventJournal journal = new SqliteEventJournal(database)) {
+            journal.append(overworld);
+            journal.append(nether);
+            assertEquals(4, journal.lastWorldSequence("asia", "overworld"));
+            assertEquals(2, journal.lastWorldSequence("asia", "nether"));
+        }
+        try (SqliteEventJournal recovered = new SqliteEventJournal(database)) {
+            assertEquals(4, recovered.lastWorldSequence("asia", "overworld"));
+            assertEquals(2, recovered.lastWorldSequence("asia", "nether"));
+        }
+    }
 }

@@ -19,6 +19,8 @@ import java.util.UUID;
 /** Strict JSON message allowlist for the first replication protocol version. */
 public final class ReplicationMessageCodec {
     private static final Set<String> EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
+            "worldId", "originServerId", "sequence", "worldSequence", "logicalClock", "createdAt", "eventType", "attributes");
+    private static final Set<String> PREVIOUS_EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
             "worldId", "originServerId", "sequence", "logicalClock", "createdAt", "eventType", "attributes");
     private static final Set<String> LEGACY_EVENT_FIELDS = Set.of("type", "protocolVersion", "eventId",
             "worldId", "originServerId", "sequence", "createdAt", "eventType", "attributes");
@@ -31,11 +33,13 @@ public final class ReplicationMessageCodec {
     public static byte[] encodeEvent(ReplicationEnvelope event) {
         JsonObject json = new JsonObject();
         json.addProperty("type", "EVENT");
-        json.addProperty("protocolVersion", event.protocolVersion());
+        int wireVersion = event.worldSequence() > 0 ? 3 : 2;
+        json.addProperty("protocolVersion", wireVersion);
         json.addProperty("eventId", event.eventId().toString());
         json.addProperty("worldId", event.worldId());
         json.addProperty("originServerId", event.originServerId());
         json.addProperty("sequence", event.sequence());
+        if (wireVersion == 3) json.addProperty("worldSequence", event.worldSequence());
         json.addProperty("logicalClock", event.logicalClock());
         json.addProperty("createdAt", event.createdAt().toString());
         json.addProperty("eventType", event.eventType());
@@ -48,9 +52,12 @@ public final class ReplicationMessageCodec {
     public static ReplicationEnvelope decodeEvent(byte[] payload, String authenticatedPeerId,
                                                    Set<String> sharedWorlds) throws IOException {
         JsonObject json = parse(payload);
-        requireFields(json, EVENT_FIELDS);
-        if (!"EVENT".equals(string(json, "type")) || integer(json, "protocolVersion") != 2)
-            throw new IOException("Unsupported replication message type or protocol version");
+        int version = integer(json, "protocolVersion");
+        if (version == 3) requireFields(json, EVENT_FIELDS);
+        else if (version == 2) requireFields(json, PREVIOUS_EVENT_FIELDS);
+        else throw new IOException("Unsupported replication protocol version");
+        if (!"EVENT".equals(string(json, "type")))
+            throw new IOException("Unsupported replication message type");
         String origin = string(json, "originServerId");
         if (!origin.equals(authenticatedPeerId))
             throw new IOException("Event origin does not match the authenticated peer");
@@ -79,8 +86,11 @@ public final class ReplicationMessageCodec {
         if ("BLOCK_PLACE".equals(eventType) && "minecraft:air".equals(next))
             throw new IOException("BLOCK_PLACE cannot result in minecraft:air");
         try {
-            return new ReplicationEnvelope(2, UUID.fromString(string(json, "eventId")), world, origin,
-                    longInteger(json, "sequence"), checkedRemoteLogicalClock(json),
+            long worldSequence = version == 3 ? longInteger(json, "worldSequence") : 0L;
+            if (version == 3 && worldSequence < 1)
+                throw new IOException("World sequence must be positive for protocol version 3");
+            return new ReplicationEnvelope(3, UUID.fromString(string(json, "eventId")), world, origin,
+                    longInteger(json, "sequence"), worldSequence, checkedRemoteLogicalClock(json),
                     Instant.parse(string(json, "createdAt")), eventType,
                     Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
                             "z", Integer.toString(z), "previous_block_data", previous, "new_block_data", next));
@@ -125,7 +135,7 @@ public final class ReplicationMessageCodec {
             long sequence = longInteger(json, "sequence");
             return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION,
                     UUID.fromString(string(json, "eventId")), string(json, "worldId"),
-                    string(json, "originServerId"), sequence,
+                    string(json, "originServerId"), sequence, 0L,
                     Math.min(sequence, dev.aemiroo.globalsync.replication.LogicalClock.MAX_REMOTE_VALUE),
                     Instant.parse(string(json, "createdAt")), eventType,
                     Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
