@@ -27,12 +27,12 @@ class SqliteReceivedEventStoreTest {
             second.accept(alpha);
             second.accept(zeta);
 
-            assertEquals(List.of(alpha.eventId()), first.pendingWinners().stream()
+            assertEquals(List.of(zeta.eventId()), first.pendingWinners().stream()
                     .map(ReplicationEnvelope::eventId).toList());
-            assertEquals(List.of(alpha.eventId()), second.pendingWinners().stream()
+            assertEquals(List.of(zeta.eventId()), second.pendingWinners().stream()
                     .map(ReplicationEnvelope::eventId).toList());
-            assertTrue(first.isCurrentWinner(alpha.eventId()));
-            assertFalse(first.isCurrentWinner(zeta.eventId()));
+            assertTrue(first.isCurrentWinner(zeta.eventId()));
+            assertFalse(first.isCurrentWinner(alpha.eventId()));
         }
     }
 
