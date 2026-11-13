@@ -347,16 +347,13 @@ public final class PeerConnectionManager implements AutoCloseable {
             if (pending == null || !pending.requestId.equals(message.requestId()))
                 throw new IOException("Unsolicited or mismatched gap event response");
             byte[] eventPayload = message.eventPayload().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            var event = ReplicationMessageCodec.decodeEvent(eventPayload, session.peerId, messageHandler.sharedWorlds());
-            if (!event.originServerId().equals(session.peerId) || event.sequence() != pending.sequence)
-                throw new IOException("Gap event does not match the requested origin sequence");
-            // Reuse the ordinary authenticated EVENT path: rate limiting, schema checks,
-            // durable inbox commit, deterministic winner selection, and apply scheduling.
-            messageHandler.handle(eventPayload, session.peerId);
+            // Reuse the ordinary authenticated EVENT validation and durable inbox path,
+            // with the additional exact sequence check before the inbox is modified.
+            UUID acceptedEventId = messageHandler.handleGapResponse(eventPayload, session.peerId, pending.sequence);
             if (!session.pendingGapRequest.compareAndSet(pending, null))
                 throw new IOException("Gap request changed while accepting its response");
-            session.write(GapRepairMessage.encodeReceived(message.requestId(), event.eventId()));
-            logger.info("Repaired missing event " + session.peerId + "#" + event.sequence());
+            session.write(GapRepairMessage.encodeReceived(message.requestId(), acceptedEventId));
+            logger.info("Repaired missing event " + session.peerId + "#" + pending.sequence);
             requestFirstGap(session);
             return;
         }
