@@ -72,7 +72,7 @@ The `network.enabled` setting remains `false` by default. Enabling it opens the 
 
 ## Delivery requirements
 
-Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Remaining transport work includes heartbeat/liveness messages, operational metrics, configurable rate limits, and broader fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
+Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Heartbeat/liveness messages and a basic PONG counter are implemented. Remaining transport work includes broader operational metrics, configurable rate limits, and fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
 
 Receivers acknowledge only after the event is durably accepted. Shared secrets must never be sent in plaintext. TLS with mutual authentication and explicit peer authorization is the selected baseline.
 
