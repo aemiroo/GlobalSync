@@ -73,7 +73,10 @@ public final class SqliteEventJournal implements AutoCloseable {
                     """);
             // Upgrade previously journaled v1 events to the v2 envelope. Their
             // per-node sequence is the only safe legacy logical-order seed.
-            statement.execute("UPDATE events SET logical_clock = MIN(origin_sequence, 1000000000), protocol_version = 2 WHERE protocol_version = 1");
+            statement.execute("UPDATE events SET logical_clock = MIN(origin_sequence, 1000000000) WHERE protocol_version = 1");
+            // Existing rows retain their global sequence identity. A zero world sequence
+            // marks legacy history that predates world-scoped cursors.
+            statement.execute("UPDATE events SET protocol_version = 3, world_sequence = 0 WHERE protocol_version < 3");
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS peer_delivery (
                         peer_server_id TEXT PRIMARY KEY,
