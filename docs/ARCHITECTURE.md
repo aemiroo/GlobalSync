@@ -83,3 +83,10 @@ A regional partition must not silently permit conflicting writes to the same aut
 ## Plugin boundary
 
 The current plugin is intentionally a thin Paper integration. Protocol types and replication primitives should remain independent of Bukkit classes so they can be tested without starting a Minecraft server. If full-fidelity capture of internal simulation changes cannot be achieved through stable Paper APIs, a narrowly scoped server integration layer may be required.
+
+
+## Snapshot boundary contract
+
+Snapshot metadata is defined in [SNAPSHOTS.md](SNAPSHOTS.md). A manifest describes one world, one immutable payload, and a per-origin vector of contiguous applied event sequences represented by that payload. These values are not local journal offsets or a global commit position. A received-event ACK is not sufficient to advance a snapshot watermark because it confirms durable inbox acceptance, not world application.
+
+The current milestone provides only the immutable manifest model and strict canonical JSON codec. It does not capture, transfer, stage, or install world data. A future capture must coordinate with Paper's server thread and block application to establish a coherent state boundary, then replay events beyond the vector after installation. The current player-block-edit-only capture boundary remains a major limitation; this is not a full Minecraft world snapshot.
