@@ -128,7 +128,7 @@ public final class SqliteEventJournal implements AutoCloseable {
 
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence,
-                       protocol_version, created_at, event_type, attributes_json
+                       logical_clock, protocol_version, created_at, event_type, attributes_json
                 FROM events
                 WHERE journal_offset > ?
                 ORDER BY journal_offset ASC
@@ -299,7 +299,7 @@ public final class SqliteEventJournal implements AutoCloseable {
     private JournalEntry findConflict(ReplicationEnvelope envelope) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence,
-                       protocol_version, created_at, event_type, attributes_json
+                       logical_clock, protocol_version, created_at, event_type, attributes_json
                 FROM events
                 WHERE event_id = ? OR (origin_server_id = ? AND origin_sequence = ?)
                 LIMIT 1
