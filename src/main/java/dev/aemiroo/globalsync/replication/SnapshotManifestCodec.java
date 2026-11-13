@@ -81,7 +81,12 @@ public final class SnapshotManifestCodec {
             throw new IOException("Snapshot origin vector exceeds the origin limit");
         }
         Map<String, Long> vector = new TreeMap<>();
+        String previousOrigin = null;
         for (Map.Entry<String, JsonElement> entry : vectorJson.entrySet()) {
+            if (previousOrigin != null && previousOrigin.compareTo(entry.getKey()) >= 0) {
+                throw new IOException("Snapshot origin vector must use strictly sorted origin IDs");
+            }
+            previousOrigin = entry.getKey();
             JsonElement value = entry.getValue();
             if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
                 throw new IOException("Snapshot origin sequence must be an integer");
