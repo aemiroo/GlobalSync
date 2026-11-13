@@ -26,4 +26,23 @@ class ReplicationMessageCodecWorldSequenceTest {
         assertEquals(7, decoded.worldSequence());
         assertEquals(event, decoded);
     }
+
+    @Test
+    void readsPreviousProtocolEventsWithoutInventingAWorldCursor() throws Exception {
+        UUID player = UUID.randomUUID();
+        ReplicationEnvelope event = new ReplicationEnvelope(3, UUID.randomUUID(), "overworld", "asia",
+                41, 7, 52, Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE",
+                Map.of("player_uuid", player.toString(), "x", "1", "y", "64", "z", "2",
+                        "previous_block_data", "minecraft:air", "new_block_data", "minecraft:stone"));
+        String previous = new String(ReplicationMessageCodec.encodeEvent(event),
+                java.nio.charset.StandardCharsets.UTF_8)
+                .replace(",\\"worldSequence\\":7", "")
+                .replace("\\"protocolVersion\\":3", "\\"protocolVersion\\":2");
+
+        ReplicationEnvelope decoded = ReplicationMessageCodec.decodeEvent(
+                previous.getBytes(java.nio.charset.StandardCharsets.UTF_8), "asia", Set.of("overworld"));
+
+        assertEquals(41, decoded.sequence());
+        assertEquals(0, decoded.worldSequence());
+    }
 }
