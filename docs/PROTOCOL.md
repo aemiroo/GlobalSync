@@ -29,7 +29,7 @@ The current Bukkit integration captures successful player block placements and b
 - Handlers run at MONITOR priority and ignore cancelled events. They do not change the world or cancel gameplay.
 - Block data is serialized using Bukkit's block-data string representation.
 
-This first capture pass intentionally does not include explosions, piston movement, fluids, redstone, growth, containers, block entities, or other environmental changes. Captured events are journaled locally; outbound sending and remote world application are not implemented.
+This first capture pass intentionally does not include explosions, piston movement, fluids, redstone, growth, containers, block entities, or other environmental changes. Captured events are journaled locally and can be delivered to authenticated peers; remote world application remains separately opt-in.
 
 ## Local journal
 
@@ -55,6 +55,7 @@ After the authenticated HELLO/READY handshake, the connection can receive versio
 - Unknown JSON fields, missing fields, incorrect types, invalid nonces, unsupported protocol versions, unconfigured peer IDs, and incorrect certificate pins are rejected.
 - Only one side dials each peer pair: the lexicographically lower server ID initiates the outbound connection. This avoids simultaneous duplicate connections when both nodes list one another.
 - Inbound and outbound connections share a bounded worker pool. Excess connections are rejected. TLS handshakes have a configured read timeout.
+- Before JSON parsing or SQLite access, each authenticated peer is subject to a bounded in-memory token bucket: at most 100 EVENT frames per second with a burst of 200, and at most 1 MiB of payload bytes per second with a 2 MiB burst. The limiter tracks at most 64 peer buckets; it does not create per-message tasks or queues. Exceeding either budget closes the current peer session, after which normal bounded reconnect and durable replay apply.
 - EVENT messages are currently limited to `BLOCK_PLACE` and `BLOCK_BREAK`; their payload must contain exactly the player UUID, integer coordinates, previous block data, and resulting block data.
 - The receiver binds `originServerId` to the authenticated TLS peer ID and checks the world against `shared-worlds`.
 - The receiver inbox is stored separately at `journal/received.db` with WAL mode and FULL synchronous commits. Event ID and `(origin node, origin sequence)` are unique keys. Exact retries return the original inbox offset; conflicting reuse is rejected. The inbox also stores pending/applied/superseded states, a Lamport clock high-water mark, and a per-block winner index.
@@ -71,7 +72,7 @@ The `network.enabled` setting remains `false` by default. Enabling it opens the 
 
 ## Delivery requirements
 
-Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Remaining transport work includes explicit rate limiting, operational metrics, and broader fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
+Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Remaining transport work includes heartbeat/liveness messages, operational metrics, configurable rate limits, and broader fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
 
 Receivers acknowledge only after the event is durably accepted. Shared secrets must never be sent in plaintext. TLS with mutual authentication and explicit peer authorization is the selected baseline.
 
