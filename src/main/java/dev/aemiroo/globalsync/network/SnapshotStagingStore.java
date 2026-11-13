@@ -39,6 +39,7 @@ public final class SnapshotStagingStore implements AutoCloseable {
 
     public record BeginResult(long nextChunk, boolean alreadyComplete) { }
     public record AppendResult(long nextChunk, boolean duplicate) { }
+    public record CompletedSnapshot(SnapshotManifest manifest, String authenticatedPeerId, Path payloadFile) { }
 
     private final Path root;
     private final Path dataDirectory;
@@ -249,6 +250,26 @@ public final class SnapshotStagingStore implements AutoCloseable {
             return row != null && "COMPLETE".equals(row.state);
         } catch (SQLException exception) {
             throw new IOException("Could not inspect snapshot staging state", exception);
+        }
+    }
+
+    /**
+     * Returns a completed snapshot for a local installer after rechecking its
+     * immutable manifest binding, safe staging path, exact length, and digest.
+     * Call from a worker thread because digest verification reads the full file.
+     */
+    public synchronized CompletedSnapshot completedSnapshot(UUID snapshotId) throws IOException {
+        Objects.requireNonNull(snapshotId, "snapshotId");
+        try {
+            Row row = find(snapshotId.toString());
+            if (row == null || !"COMPLETE".equals(row.state))
+                throw new IOException("Snapshot is not completely staged");
+            SnapshotManifest manifest = SnapshotManifestCodec.decode(row.manifest);
+            Path file = dataPath(snapshotId.toString());
+            verifyCompletedFile(file, manifest);
+            return new CompletedSnapshot(manifest, row.peerId, file);
+        } catch (SQLException exception) {
+            throw new IOException("Could not inspect completed snapshot staging state", exception);
         }
     }
 
