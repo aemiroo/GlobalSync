@@ -26,6 +26,8 @@ network:
   delivery-poll-ms: 250
   reconnect-min-ms: 1000
   reconnect-max-ms: 30000
+  heartbeat-interval-ms: 15000
+  heartbeat-timeout-ms: 45000
   tls:
     identity-store: "tls/node.p12"
     identity-store-password-env: "GLOBALSYNC_KEYSTORE_PASSWORD"
