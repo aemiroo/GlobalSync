@@ -85,3 +85,21 @@ The staging store is separate from all live world directories:
 A successful `SNAPSHOT_COMPLETE` means **the payload is durably staged and its length and SHA-256 were verified**. It does not mean that the snapshot was installed, loaded, or applied to a world. Staged snapshots remain on disk; there is no automatic retention or pruning policy yet, and completed snapshots continue to count against the 1 GiB reservation limit. Operators should preserve the staging directory until a later installation/retention stage explicitly consumes it.
 
 The receiver does not unzip, deserialize Java objects, load classes, execute commands, alter configuration, or write into a live world. The payload remains opaque bytes in a UUID-named staging file. The outbound snapshot sender and live-world installation are separate follow-up milestones.
+
+
+## PAPER_BLOCK_DATA_V1 payload framing
+
+The first payload codec is now specified and implemented by `SnapshotPayloadCodec`. It is a deterministic binary stream, not a ZIP or general archive:
+
+| Field | Encoding |
+|---|---|
+| Magic | 4 bytes: ASCII `GSB1` |
+| Payload version | 1 unsigned byte; currently `1` |
+| Record count | 4-byte unsigned big-endian integer |
+| Each record | 3 signed 32-bit big-endian coordinates (x, y, z), 2-byte unsigned big-endian UTF-8 byte length, then the BlockData bytes |
+
+Records must be strictly sorted by ascending `x`, then `y`, then `z`. Duplicate coordinates are invalid. BlockData is limited to 1,024 UTF-8 bytes and must be a namespaced, lowercase material key with an optional simple property list. Each record has 14 bytes of framing plus its UTF-8 BlockData bytes. The record count is capped at 16,777,216. The stream must contain exactly the declared number of records and no trailing bytes.
+
+The codec is streaming: it does not buffer the entire payload, close caller-owned streams, load classes, deserialize Java objects, or interpret paths. It validates strict UTF-8 and rejects malformed headers, unsupported versions, invalid record counts, unsorted or duplicate coordinates, malformed BlockData, truncated records, and trailing data. The writer reports the exact emitted byte length so a caller can compute the manifest length and digest while writing to a temporary file.
+
+This defines the bytes represented by `PAPER_BLOCK_DATA_V1`; it does **not** implement a Paper world capture. A future capture service must obtain records from Bukkit/Paper safely on the server thread, avoid force-loading chunks, define which loaded/known chunks are in scope, and coordinate its event watermark with actual applied world state. No snapshot manifest should be produced until that capture boundary can be proven coherent.
