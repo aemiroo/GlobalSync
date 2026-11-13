@@ -1,7 +1,6 @@
 package dev.aemiroo.globalsync.network;
 
 import dev.aemiroo.globalsync.replication.SnapshotManifest;
-import dev.aemiroo.globalsync.replication.SnapshotManifestCodec;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -98,7 +97,7 @@ class SnapshotTransferMessageTest {
         String valid = new String(SnapshotTransferMessage.encodeChunk(REQUEST, SNAPSHOT, 0, new byte[]{1}),
                 StandardCharsets.UTF_8);
         assertThrows(IOException.class, () -> SnapshotTransferMessage.decode(
-                valid.replace("\"AQ==\"", "\"AQ\u003d\"").getBytes(StandardCharsets.UTF_8)));
+                valid.replace("\"AQ==\"", "\"AQ===\"").getBytes(StandardCharsets.UTF_8)));
         assertThrows(IOException.class, () -> SnapshotTransferMessage.decode(
                 valid.replace("\"chunkIndex\":0", "\"chunkIndex\":-1")
                         .getBytes(StandardCharsets.UTF_8)));
