@@ -70,6 +70,12 @@ Configure each remote peer under `network.peers.<server-id>` with `host`, `port`
 
 The `network.enabled` setting remains `false` by default. Enabling it opens the TLS listener, initiates configured peer handshakes, and enables bidirectional durable event delivery. Remote application is separately controlled by `application.enabled`, which also defaults to `false`. Use both only in a controlled test network with operator-provisioned certificates and firewall restrictions.
 
+## Peer progress diagnostics
+
+`/globalsync status` reports each configured peer as `DISCONNECTED`, `CATCHING_UP`, or `CURRENT`. The state is derived from the active authenticated session and this node's durable outbound cursor: a connected peer with pending local journal rows is catching up; a connected peer with no pending rows is current; a missing/closed session is disconnected. The report also includes this node's journal head and acknowledged offsets, pending row count, oldest pending event timestamp, and valid heartbeat PONG count for the active session.
+
+These offsets belong only to the reporting node's `events.db`. The remote receipt offset remains diagnostic metadata and is never used as the local cursor. This view measures outbound delivery, not remote world application or completeness of the remote replica. ACK confirms durable inbox acceptance only.
+
 ## Delivery requirements
 
 Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Heartbeat/liveness messages and a basic PONG counter are implemented. Remaining transport work includes broader operational metrics, configurable rate limits, and fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.

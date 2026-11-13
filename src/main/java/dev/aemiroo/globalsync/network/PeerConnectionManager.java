@@ -1,6 +1,7 @@
 package dev.aemiroo.globalsync.network;
 
 import dev.aemiroo.globalsync.replication.JournalEntry;
+import dev.aemiroo.globalsync.replication.PeerReplicationProgress;
 import dev.aemiroo.globalsync.replication.SqliteEventJournal;
 
 import javax.net.ssl.SSLContext;
@@ -12,6 +13,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -343,6 +345,23 @@ public final class PeerConnectionManager implements AutoCloseable {
     public long heartbeatPongCount(String peerServerId) {
         PeerSession session = connections.get(peerServerId);
         return session == null ? 0 : session.heartbeatPongsReceived.get();
+    }
+
+    /**
+     * Reads a point-in-time outbound progress view for every configured peer.
+     * SQLite access is synchronized and callers should invoke this off the Paper
+     * main thread. A missing session is reported as disconnected, not healthy.
+     */
+    public List<PeerReplicationProgress> replicationProgress() throws SQLException {
+        if (eventJournal == null) return List.of();
+        List<PeerReplicationProgress> progress = new java.util.ArrayList<>();
+        for (PeerEndpoint endpoint : authorization.peers()) {
+            PeerSession session = connections.get(endpoint.serverId());
+            boolean connected = session != null && session.isOpen();
+            long pongs = connected ? session.heartbeatPongsReceived.get() : 0L;
+            progress.add(eventJournal.peerProgress(endpoint.serverId(), connected, pongs));
+        }
+        return List.copyOf(progress);
     }
 
     private void deliverJournal(PeerSession session) {

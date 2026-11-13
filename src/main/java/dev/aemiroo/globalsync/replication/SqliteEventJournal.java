@@ -235,6 +235,42 @@ public final class SqliteEventJournal implements AutoCloseable {
         }
     }
 
+    /**
+     * Returns a local-only progress snapshot for one configured peer. The
+     * acknowledged offset is this node's cursor, never the receiver's offset.
+     */
+    public synchronized PeerReplicationProgress peerProgress(String peerServerId,
+                                                               boolean connected,
+                                                               long heartbeatPongs) throws SQLException {
+        if (peerServerId == null || !peerServerId.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IllegalArgumentException("Invalid peer server ID");
+        }
+        if (heartbeatPongs < 0) throw new IllegalArgumentException("heartbeatPongs must not be negative");
+
+        long head = lastOffset();
+        long acknowledged = acknowledgedOffset(peerServerId);
+        long pending;
+        Instant oldest = null;
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT COUNT(*), MIN(created_at)
+                FROM events
+                WHERE journal_offset > ?
+                """)) {
+            query.setLong(1, acknowledged);
+            try (ResultSet result = query.executeQuery()) {
+                if (result.next()) {
+                    pending = result.getLong(1);
+                    String timestamp = result.getString(2);
+                    if (timestamp != null) oldest = Instant.parse(timestamp);
+                } else {
+                    pending = 0;
+                }
+            }
+        }
+        return new PeerReplicationProgress(peerServerId, connected, heartbeatPongs,
+                head, acknowledged, pending, oldest);
+    }
+
     public synchronized long lastOffset() throws SQLException {
         try (Statement query = connection.createStatement();
              ResultSet result = query.executeQuery("SELECT COALESCE(MAX(journal_offset), 0) FROM events")) {

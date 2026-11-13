@@ -9,6 +9,7 @@ import dev.aemiroo.globalsync.network.TlsContextFactory;
 import dev.aemiroo.globalsync.replication.BlockChangeEnvelopeFactory;
 import dev.aemiroo.globalsync.replication.BlockApplicationService;
 import dev.aemiroo.globalsync.replication.LogicalClock;
+import dev.aemiroo.globalsync.replication.PeerReplicationProgress;
 import dev.aemiroo.globalsync.replication.EventDeduplicator;
 import dev.aemiroo.globalsync.replication.ReplicationEnvelope;
 import dev.aemiroo.globalsync.replication.SequenceClock;
@@ -27,6 +28,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.sql.SQLException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -248,6 +251,43 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 ? "journal capture only" : "bidirectional durable event delivery enabled"));
         sender.sendMessage("§7World application: §f" + (blockApplicationService == null
                 ? "disabled" : "enabled"));
+
+        if (peerConnectionManager != null) {
+            sender.sendMessage("§7Peer progress: §floading durable delivery cursors...");
+            Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                try {
+                    List<PeerReplicationProgress> progress = peerConnectionManager.replicationProgress();
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        sender.sendMessage("§6Peer replication progress");
+                        if (progress.isEmpty()) {
+                            sender.sendMessage("§7No configured peers.");
+                            return;
+                        }
+                        for (PeerReplicationProgress peer : progress) {
+                            String color = switch (peer.state()) {
+                                case "CURRENT" -> "§a";
+                                case "CATCHING_UP" -> "§e";
+                                default -> "§c";
+                            };
+                            sender.sendMessage(color + peer.peerServerId() + " §7" + peer.state()
+                                    + " §8| §7pending: §f" + peer.pendingEvents()
+                                    + " §8| §7cursor: §f" + peer.acknowledgedOffset()
+                                    + "/" + peer.journalHeadOffset()
+                                    + " §8| §7PONGs: §f" + peer.heartbeatPongs());
+                            if (peer.oldestPendingAt() != null) {
+                                long age = Math.max(0, Duration.between(peer.oldestPendingAt(), Instant.now()).toSeconds());
+                                sender.sendMessage("  §7Oldest pending event: §f" + age + "s");
+                            }
+                        }
+                        sender.sendMessage("§8Offsets are local to this node; they are not global commit positions.");
+                    });
+                } catch (SQLException exception) {
+                    getLogger().log(Level.WARNING, "Could not read peer replication progress.", exception);
+                    Bukkit.getScheduler().runTask(this,
+                            () -> sender.sendMessage("§cCould not read peer replication progress. Check the server log."));
+                }
+            });
+        }
         return true;
     }
 
