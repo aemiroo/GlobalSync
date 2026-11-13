@@ -384,7 +384,12 @@ public final class PeerConnectionManager implements AutoCloseable {
                 session.write(current.frame);
                 return;
             }
-            var entry = eventJournal.findByOriginSequence(localServerId, message.sequence());
+            final java.util.Optional<JournalEntry> entry;
+            try {
+                entry = eventJournal.findByOriginSequence(localServerId, message.sequence());
+            } catch (SQLException exception) {
+                throw new IOException("Could not look up requested origin event", exception);
+            }
             byte[] response;
             UUID eventId = null;
             if (entry.isPresent()) {
