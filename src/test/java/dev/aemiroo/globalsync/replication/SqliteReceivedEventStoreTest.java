@@ -5,6 +5,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -72,6 +76,56 @@ class SqliteReceivedEventStoreTest {
         }
     }
 
+
+
+    @Test
+    void migratesPreviouslyReceivedV1EventsAndRecognizesTheirV2Replay() throws Exception {
+        Path database = directory.resolve("legacy.db");
+        String eventId = "9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1";
+        String playerId = "d6a9b5df-1b1d-4b17-9f45-9f9b9f1b7d11";
+        String payload = "{\"type\":\"EVENT\",\"protocolVersion\":1,\"eventId\":\"" + eventId
+                + "\",\"worldId\":\"world\",\"originServerId\":\"region-old\",\"sequence\":7"
+                + ",\"createdAt\":\"2026-11-13T00:00:00Z\",\"eventType\":\"BLOCK_PLACE\""
+                + ",\"attributes\":{\"new_block_data\":\"minecraft:stone\",\"player_uuid\":\""
+                + playerId + "\",\"previous_block_data\":\"minecraft:air\",\"x\":\"12\""
+                + ",\"y\":\"64\",\"z\":\"-4\"}}";
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + database);
+             Statement statement = connection.createStatement()) {
+            statement.execute("""
+                    CREATE TABLE received_events (
+                        receipt_offset INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id TEXT NOT NULL UNIQUE,
+                        origin_server_id TEXT NOT NULL,
+                        origin_sequence INTEGER NOT NULL CHECK (origin_sequence > 0),
+                        world_id TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        UNIQUE (origin_server_id, origin_sequence)
+                    )
+                    """);
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    INSERT INTO received_events
+                    (event_id, origin_server_id, origin_sequence, world_id, payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, eventId);
+                insert.setString(2, "region-old");
+                insert.setLong(3, 7);
+                insert.setString(4, "world");
+                insert.setString(5, payload);
+                insert.executeUpdate();
+            }
+        }
+
+        try (SqliteReceivedEventStore migrated = new SqliteReceivedEventStore(database)) {
+            ReplicationEnvelope event = migrated.pendingWinners().getFirst();
+            assertEquals(7, event.logicalClock());
+            assertEquals(UUID.fromString(eventId), event.eventId());
+            assertEquals(7, migrated.lastLogicalClock());
+            var replay = migrated.accept(event);
+            assertTrue(replay.duplicate());
+            assertTrue(replay.applyRequired());
+        }
+    }
 
     @Test
     void pendingRemoteWinnerSurvivesInboxRestart() throws Exception {
