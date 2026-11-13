@@ -336,6 +336,8 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         int deliveryPollMillis = network.getInt("delivery-poll-ms", 250);
         int reconnectMinMillis = network.getInt("reconnect-min-ms", 1_000);
         int reconnectMaxMillis = network.getInt("reconnect-max-ms", 30_000);
+        int heartbeatIntervalMillis = network.getInt("heartbeat-interval-ms", 15_000);
+        int heartbeatTimeoutMillis = network.getInt("heartbeat-timeout-ms", 45_000);
         PeerAuthorizationRegistry authorization = new PeerAuthorizationRegistry(peers);
         peerConnectionManager = new PeerConnectionManager(
                 tlsContext,
@@ -353,7 +355,9 @@ public final class GlobalSyncPlugin extends JavaPlugin {
                 acknowledgementTimeoutMillis,
                 deliveryPollMillis,
                 reconnectMinMillis,
-                reconnectMaxMillis
+                reconnectMaxMillis,
+                heartbeatIntervalMillis,
+                heartbeatTimeoutMillis
         );
         InetAddress bindAddress = InetAddress.getByName(network.getString("bind-address", "127.0.0.1"));
         int bindPort = network.getInt("bind-port", 28_120);

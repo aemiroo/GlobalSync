@@ -23,6 +23,9 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
@@ -42,11 +45,16 @@ public final class PeerConnectionManager implements AutoCloseable {
     private final int deliveryPollMillis;
     private final int reconnectMinMillis;
     private final int reconnectMaxMillis;
+    private final int heartbeatIntervalMillis;
+    private final int heartbeatTimeoutMillis;
     private final Logger logger;
     private final ReplicationMessageHandler messageHandler;
     private final SqliteEventJournal eventJournal;
     private final ThreadPoolExecutor connectionWorkers;
     private final ThreadPoolExecutor deliveryWorkers;
+    private final ScheduledExecutorService heartbeatWorker;
+    private final PeerMessageRateLimiter controlRateLimiter =
+            new PeerMessageRateLimiter(64, 10.0, 20.0, 16_384.0, 32_768.0);
     private final Map<String, PeerSession> connections = new ConcurrentHashMap<>();
     private final Set<Socket> pendingSockets = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean running = new AtomicBoolean();
@@ -72,6 +80,18 @@ public final class PeerConnectionManager implements AutoCloseable {
             int handshakeTimeoutMillis, Logger logger, ReplicationMessageHandler messageHandler,
             SqliteEventJournal eventJournal, int acknowledgementTimeoutMillis,
             int deliveryPollMillis, int reconnectMinMillis, int reconnectMaxMillis) {
+        this(tlsContext, localServerId, authorization, maxFrameBytes, maxConnections,
+                handshakeTimeoutMillis, logger, messageHandler, eventJournal,
+                acknowledgementTimeoutMillis, deliveryPollMillis, reconnectMinMillis,
+                reconnectMaxMillis, 15_000, 45_000);
+    }
+
+    public PeerConnectionManager(SSLContext tlsContext, String localServerId,
+            PeerAuthorizationRegistry authorization, int maxFrameBytes, int maxConnections,
+            int handshakeTimeoutMillis, Logger logger, ReplicationMessageHandler messageHandler,
+            SqliteEventJournal eventJournal, int acknowledgementTimeoutMillis,
+            int deliveryPollMillis, int reconnectMinMillis, int reconnectMaxMillis,
+            int heartbeatIntervalMillis, int heartbeatTimeoutMillis) {
         this.tlsContext = Objects.requireNonNull(tlsContext, "tlsContext");
         this.localServerId = Objects.requireNonNull(localServerId, "localServerId");
         this.authorization = Objects.requireNonNull(authorization, "authorization");
@@ -94,6 +114,11 @@ public final class PeerConnectionManager implements AutoCloseable {
             throw new IllegalArgumentException("deliveryPollMillis must be between 50 and 10000");
         if (reconnectMinMillis < 250 || reconnectMaxMillis < reconnectMinMillis || reconnectMaxMillis > 300_000)
             throw new IllegalArgumentException("Invalid reconnect backoff bounds");
+        if (heartbeatIntervalMillis < 1_000 || heartbeatIntervalMillis > 120_000)
+            throw new IllegalArgumentException("heartbeatIntervalMillis must be between 1000 and 120000");
+        if (heartbeatTimeoutMillis < heartbeatIntervalMillis
+                || heartbeatTimeoutMillis > 300_000)
+            throw new IllegalArgumentException("heartbeatTimeoutMillis must be at least the interval and at most 300000");
         if ((messageHandler == null) != (eventJournal == null))
             throw new IllegalArgumentException("Inbound handler and outgoing journal must be configured together");
         this.maxFrameBytes = maxFrameBytes;
@@ -103,8 +128,16 @@ public final class PeerConnectionManager implements AutoCloseable {
         this.deliveryPollMillis = deliveryPollMillis;
         this.reconnectMinMillis = reconnectMinMillis;
         this.reconnectMaxMillis = reconnectMaxMillis;
+        this.heartbeatIntervalMillis = heartbeatIntervalMillis;
+        this.heartbeatTimeoutMillis = heartbeatTimeoutMillis;
         this.connectionWorkers = workerPool(maxConnections, "GlobalSync-Peer-Worker");
         this.deliveryWorkers = workerPool(maxConnections, "GlobalSync-Delivery-Worker");
+        this.heartbeatWorker = Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = new Thread(task, "GlobalSync-Heartbeat");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.heartbeatWorker.scheduleAtFixedRate(this::checkHeartbeats, 1, 1, TimeUnit.SECONDS);
     }
 
     private static ThreadPoolExecutor workerPool(int size, String name) {
@@ -237,6 +270,21 @@ public final class PeerConnectionManager implements AutoCloseable {
 
             while (running.get() && session.isOpen()) {
                 byte[] frame = FrameCodec.readFrame(socket.getInputStream(), maxFrameBytes);
+                session.markInbound();
+                if (PeerControlMessage.isControl(frame)) {
+                    if (!controlRateLimiter.tryAcquire(peerId, frame.length))
+                        throw new IOException("Peer exceeded the control-message rate limit");
+                    PeerControlMessage.Message control = PeerControlMessage.decode(frame);
+                    if (control.type() == PeerControlMessage.Type.PING) {
+                        session.write(PeerControlMessage.encodePong(control.nonce()));
+                    } else {
+                        PendingHeartbeat pending = session.pendingHeartbeat.getAndSet(null);
+                        if (pending == null || !pending.nonce.equals(control.nonce()))
+                            throw new IOException("Unsolicited or mismatched heartbeat response");
+                        session.heartbeatPongsReceived.incrementAndGet();
+                    }
+                    continue;
+                }
                 if (messageHandler == null) {
                     throw new IOException("Application messages are not enabled");
                 }
@@ -264,6 +312,37 @@ public final class PeerConnectionManager implements AutoCloseable {
             pendingSockets.remove(socket);
             closeQuietly(socket);
         }
+    }
+
+    private void checkHeartbeats() {
+        if (!running.get()) return;
+        long now = System.nanoTime();
+        for (PeerSession session : connections.values()) {
+            if (!session.isOpen()) continue;
+            PendingHeartbeat pending = session.pendingHeartbeat.get();
+            if (pending != null) {
+                if (now - pending.sentAtNanos >= TimeUnit.MILLISECONDS.toNanos(heartbeatTimeoutMillis)) {
+                    logger.warning("Peer " + session.peerId + " missed its heartbeat response; closing session.");
+                    session.close();
+                }
+                continue;
+            }
+            if (now - session.lastInboundNanos.get() < TimeUnit.MILLISECONDS.toNanos(heartbeatIntervalMillis))
+                continue;
+            PendingHeartbeat next = new PendingHeartbeat(UUID.randomUUID(), now);
+            if (!session.pendingHeartbeat.compareAndSet(null, next)) continue;
+            try {
+                session.write(PeerControlMessage.encodePing(next.nonce));
+            } catch (IOException exception) {
+                session.close();
+            }
+        }
+    }
+
+    /** Number of valid PONG responses received on the currently active peer session. */
+    public long heartbeatPongCount(String peerServerId) {
+        PeerSession session = connections.get(peerServerId);
+        return session == null ? 0 : session.heartbeatPongsReceived.get();
     }
 
     private void deliverJournal(PeerSession session) {
@@ -313,6 +392,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         if (!running.getAndSet(false)) {
             connectionWorkers.shutdownNow();
             deliveryWorkers.shutdownNow();
+            heartbeatWorker.shutdownNow();
             return;
         }
         closeQuietly(listener);
@@ -323,6 +403,7 @@ public final class PeerConnectionManager implements AutoCloseable {
         connections.clear();
         connectionWorkers.shutdownNow();
         deliveryWorkers.shutdownNow();
+        heartbeatWorker.shutdownNow();
         try {
             connectionWorkers.awaitTermination(5, TimeUnit.SECONDS);
             deliveryWorkers.awaitTermination(5, TimeUnit.SECONDS);
@@ -344,17 +425,30 @@ public final class PeerConnectionManager implements AutoCloseable {
         private PendingDelivery(JournalEntry entry) { this.entry = entry; }
     }
 
+    private static final class PendingHeartbeat {
+        private final UUID nonce;
+        private final long sentAtNanos;
+        private PendingHeartbeat(UUID nonce, long sentAtNanos) {
+            this.nonce = nonce;
+            this.sentAtNanos = sentAtNanos;
+        }
+    }
+
     private static final class PeerSession {
         private final String peerId;
         private final SSLSocket socket;
         private final int maxFrameBytes;
         private final AtomicBoolean open = new AtomicBoolean(true);
         private final AtomicReference<PendingDelivery> pending = new AtomicReference<>();
+        private final AtomicReference<PendingHeartbeat> pendingHeartbeat = new AtomicReference<>();
+        private final AtomicLong lastInboundNanos = new AtomicLong(System.nanoTime());
+        private final AtomicLong heartbeatPongsReceived = new AtomicLong();
         private PeerSession(String peerId, SSLSocket socket, int maxFrameBytes) {
             this.peerId = peerId;
             this.socket = socket;
             this.maxFrameBytes = maxFrameBytes;
         }
+        private void markInbound() { lastInboundNanos.set(System.nanoTime()); }
         private boolean isOpen() { return open.get() && !socket.isClosed(); }
         private void write(byte[] frame) throws IOException {
             synchronized (socket) {
@@ -366,6 +460,7 @@ public final class PeerConnectionManager implements AutoCloseable {
             if (open.getAndSet(false)) {
                 PendingDelivery current = pending.getAndSet(null);
                 if (current != null) current.future.completeExceptionally(new IOException("Peer disconnected"));
+                pendingHeartbeat.set(null);
                 closeQuietly(socket);
             }
         }
