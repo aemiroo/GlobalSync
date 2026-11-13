@@ -8,10 +8,10 @@ import java.util.UUID;
 /** Versioned event metadata with deterministic cross-node conflict ordering. */
 public record ReplicationEnvelope(
         int protocolVersion, UUID eventId, String worldId, String originServerId,
-        long sequence, long logicalClock, Instant createdAt, String eventType,
+        long sequence, long worldSequence, long logicalClock, Instant createdAt, String eventType,
         Map<String, String> attributes
 ) {
-    public static final int CURRENT_PROTOCOL_VERSION = 2;
+    public static final int CURRENT_PROTOCOL_VERSION = 3;
 
     public ReplicationEnvelope {
         if (protocolVersion != CURRENT_PROTOCOL_VERSION)
@@ -23,6 +23,7 @@ public record ReplicationEnvelope(
         requireText(originServerId, "originServerId");
         requireText(eventType, "eventType");
         if (sequence < 1) throw new IllegalArgumentException("sequence must be positive");
+        if (worldSequence < 1) throw new IllegalArgumentException("worldSequence must be positive");
         if (logicalClock < 1 || logicalClock > LogicalClock.MAX_VALUE)
             throw new IllegalArgumentException("logicalClock is outside the supported range");
         attributes = Map.copyOf(attributes);
@@ -32,7 +33,7 @@ public record ReplicationEnvelope(
     public ReplicationEnvelope(int protocolVersion, UUID eventId, String worldId,
             String originServerId, long sequence, Instant createdAt, String eventType,
             Map<String, String> attributes) {
-        this(protocolVersion, eventId, worldId, originServerId, sequence, sequence,
+        this(protocolVersion, eventId, worldId, originServerId, sequence, sequence, sequence,
                 createdAt, eventType, attributes);
     }
 
