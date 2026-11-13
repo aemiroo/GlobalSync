@@ -250,10 +250,12 @@ public final class SnapshotStagingStore implements AutoCloseable {
     }
 
     private void recoverIncompleteFiles() throws IOException, SQLException {
+        Set<String> retained = new java.util.HashSet<>();
         try (Statement query = connection.createStatement();
              ResultSet rows = query.executeQuery("SELECT snapshot_id,received_bytes,state FROM staged_snapshots")) {
             while (rows.next()) {
                 String id = rows.getString(1);
+                retained.add(id + ".part");
                 Path file = dataPath(id);
                 if (Files.isSymbolicLink(file) || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
                     throw new IOException("A staged snapshot file is missing or unsafe");
@@ -266,6 +268,19 @@ public final class SnapshotStagingStore implements AutoCloseable {
                         channel.force(true);
                     }
                 }
+            }
+        }
+        // A crash between CREATE_NEW and the SQLite insert can leave an orphan.
+        // Remove only files with our exact UUID-derived naming convention.
+        try (var files = Files.newDirectoryStream(dataDirectory)) {
+            for (Path file : files) {
+                String name = file.getFileName().toString();
+                if (!name.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.part"))
+                    throw new IOException("Unexpected entry in snapshot staging data directory");
+                if (Files.isSymbolicLink(file)
+                        || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                    throw new IOException("Unsafe entry in snapshot staging data directory");
+                if (!retained.contains(name)) Files.delete(file);
             }
         }
     }
