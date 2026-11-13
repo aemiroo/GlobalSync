@@ -64,6 +64,12 @@ Authenticated sessions exchange nonce-matched PING/PONG frames after an idle int
 
 A single daemon scheduler checks active sessions. When a session has received no frames for the configured interval, it sends one nonce-bearing PING. The reader accepts only a matching PONG, responds to peer PINGs, and counts valid responses. If the PONG deadline expires, the session is closed; durable delivery resumes from the last acknowledged journal cursor after reconnect. Heartbeat messages do not touch the event inbox or journal. Defaults are a 15-second idle interval and a 45-second response timeout.
 
+## Replica progress visibility
+
+The local journal can produce a point-in-time delivery snapshot for each configured peer: this node's journal head offset, that peer's durable acknowledgement cursor, the number of still-pending local events, and the oldest pending event timestamp. The connection manager adds whether an authenticated session is currently open and the valid PONG count for that active session. `/globalsync status` reports `DISCONNECTED`, `CATCHING_UP`, or `CURRENT` from those facts. A disconnected peer is never reported current, even when its local backlog is empty.
+
+These are outbound-delivery diagnostics only. A successful ACK means the remote inbox durably accepted the event; it does not prove that the remote Paper world applied it. Local offsets are not comparable between nodes, and this status view does not detect missing remote-origin events or prove world equivalence. The status command performs its SQLite reads asynchronously and sends the result back on the Paper server thread.
+
 ## Failure behavior
 
 A regional partition must not silently permit conflicting writes to the same authoritative state. Nodes should track their last committed offset, detect gaps, and resynchronize from the durable log or a snapshot. A disconnected region may continue read-only, or accept only operations explicitly safe to queue, until it can rejoin without creating split-brain state.
