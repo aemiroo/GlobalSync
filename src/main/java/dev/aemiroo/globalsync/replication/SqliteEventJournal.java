@@ -15,6 +15,7 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -275,6 +276,34 @@ public final class SqliteEventJournal implements AutoCloseable {
         try (Statement query = connection.createStatement();
              ResultSet result = query.executeQuery("SELECT COALESCE(MAX(journal_offset), 0) FROM events")) {
             return result.next() ? result.getLong(1) : 0;
+        }
+    }
+
+    /**
+     * Finds one exact event in this node's durable journal by its origin-local
+     * identity. This does not authorize a network requester; callers must bind
+     * the requested origin to the authenticated peer before using the result.
+     */
+    public synchronized Optional<JournalEntry> findByOriginSequence(String originServerId,
+                                                                      long originSequence) throws SQLException {
+        if (originServerId == null || !originServerId.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IllegalArgumentException("Invalid origin server ID");
+        }
+        if (originSequence < 1) {
+            throw new IllegalArgumentException("originSequence must be positive");
+        }
+
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT journal_offset, event_id, world_id, origin_server_id, origin_sequence,
+                       logical_clock, protocol_version, created_at, event_type, attributes_json
+                FROM events
+                WHERE origin_server_id = ? AND origin_sequence = ?
+                """)) {
+            query.setString(1, originServerId);
+            query.setLong(2, originSequence);
+            try (ResultSet result = query.executeQuery()) {
+                return result.next() ? Optional.of(readEntry(result)) : Optional.empty();
+            }
         }
     }
 

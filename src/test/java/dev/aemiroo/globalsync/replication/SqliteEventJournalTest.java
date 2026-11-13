@@ -91,6 +91,43 @@ class SqliteEventJournalTest {
     }
 
     @Test
+    void findsExactOriginSequenceWithoutConfusingOtherOriginsOrLocalOffsets() throws Exception {
+        Path database = temporaryDirectory.resolve("origin-lookup/events.db");
+        ReplicationEnvelope asiaFirst = event(UUID.randomUUID(), "asia", 1, "BLOCK_PLACE");
+        ReplicationEnvelope europeFirst = event(UUID.randomUUID(), "europe", 1, "BLOCK_BREAK");
+        ReplicationEnvelope asiaSecond = event(UUID.randomUUID(), "asia", 2, "BLOCK_BREAK");
+
+        try (SqliteEventJournal journal = new SqliteEventJournal(database)) {
+            long firstOffset = journal.append(asiaFirst);
+            journal.append(europeFirst);
+            long secondOffset = journal.append(asiaSecond);
+
+            var found = journal.findByOriginSequence("asia", 2);
+            assertTrue(found.isPresent());
+            assertEquals(secondOffset, found.orElseThrow().offset());
+            assertEquals(asiaSecond, found.orElseThrow().envelope());
+
+            assertEquals(asiaFirst, journal.findByOriginSequence("asia", 1).orElseThrow().envelope());
+            assertEquals(europeFirst, journal.findByOriginSequence("europe", 1).orElseThrow().envelope());
+            assertTrue(journal.findByOriginSequence("asia", 3).isEmpty());
+            assertEquals(firstOffset, journal.findByOriginSequence("asia", 1).orElseThrow().offset());
+        }
+
+        try (SqliteEventJournal recovered = new SqliteEventJournal(database)) {
+            assertEquals(asiaSecond,
+                    recovered.findByOriginSequence("asia", 2).orElseThrow().envelope());
+        }
+    }
+
+    @Test
+    void rejectsInvalidOriginSequenceLookupArguments() throws Exception {
+        try (SqliteEventJournal journal = new SqliteEventJournal(temporaryDirectory.resolve("invalid-lookup.db"))) {
+            assertThrows(IllegalArgumentException.class, () -> journal.findByOriginSequence("../asia", 1));
+            assertThrows(IllegalArgumentException.class, () -> journal.findByOriginSequence("asia", 0));
+        }
+    }
+
+    @Test
     void rejectsInvalidReplayBounds() throws Exception {
         try (SqliteEventJournal journal = new SqliteEventJournal(temporaryDirectory.resolve("events.db"))) {
             assertThrows(IllegalArgumentException.class, () -> journal.readAfter(-1, 10));
