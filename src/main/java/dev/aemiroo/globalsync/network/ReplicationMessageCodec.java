@@ -125,7 +125,8 @@ public final class ReplicationMessageCodec {
             long sequence = longInteger(json, "sequence");
             return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION,
                     UUID.fromString(string(json, "eventId")), string(json, "worldId"),
-                    string(json, "originServerId"), sequence, sequence,
+                    string(json, "originServerId"), sequence,
+                    Math.min(sequence, dev.aemiroo.globalsync.replication.LogicalClock.MAX_REMOTE_VALUE),
                     Instant.parse(string(json, "createdAt")), eventType,
                     Map.of("player_uuid", player, "x", Integer.toString(x), "y", Integer.toString(y),
                             "z", Integer.toString(z), "previous_block_data", previous,
