@@ -157,7 +157,7 @@ public final class SnapshotPayloadCodec {
         int separator = material.indexOf(':');
         if (separator < 1 || separator == material.length() - 1
                 || material.indexOf(':', separator + 1) >= 0) return false;
-        return value.matches("[a-z0-9_.-]+:[a-z0-9_./-]+(?:\\\\[[a-z0-9_./,=-]+\\\\])?");
+        return value.matches("[a-z0-9_.-]+:[a-z0-9_./-]+(?:\\[[a-z0-9_./,=-]+\\])?");
     }
 
     private static String decodeStrict(byte[] bytes) throws IOException {
