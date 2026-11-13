@@ -125,7 +125,7 @@ public final class GlobalSyncPlugin extends JavaPlugin {
         if (peerConnectionManager == null) {
             getLogger().info("Peer networking is disabled.");
         } else {
-            getLogger().info("Authenticated peers are connected; outbound journal delivery and durable inbound receipt are active. World application remains disabled.");
+            getLogger().info("Authenticated peers are connected; outbound delivery, durable inbox, and configured block application are active.");
         }
     }
 
@@ -267,7 +267,10 @@ public final class GlobalSyncPlugin extends JavaPlugin {
             List<dev.aemiroo.globalsync.replication.JournalEntry> entries = eventJournal.readAfter(cursor, 500);
             if (entries.isEmpty()) break;
             for (var entry : entries) {
-                receivedEventStore.acceptLocal(entry.envelope());
+                if (BlockChangeEnvelopeFactory.BLOCK_PLACE.equals(entry.envelope().eventType())
+                        || BlockChangeEnvelopeFactory.BLOCK_BREAK.equals(entry.envelope().eventType())) {
+                    receivedEventStore.acceptLocal(entry.envelope());
+                }
                 cursor = entry.offset();
             }
         }
