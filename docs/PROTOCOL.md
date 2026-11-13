@@ -76,6 +76,12 @@ The `network.enabled` setting remains `false` by default. Enabling it opens the 
 
 These offsets belong only to the reporting node's `events.db`. The remote receipt offset remains diagnostic metadata and is never used as the local cursor. This view measures outbound delivery, not remote world application or completeness of the remote replica. ACK confirms durable inbox acceptance only.
 
+## Origin sequence-gap diagnostics
+
+The receiver derives per-origin sequence coverage from the durable `received_events` inbox. For each origin with at least one stored event, it checks sequence numbers beginning at one and reports the first absent sequence only when a higher sequence has already been received. A contiguous origin reports coverage through its highest observed sequence. The `/globalsync status` output includes the received count and highest observed sequence so operators can distinguish a small gap from a larger backlog.
+
+The existing sender uses stop-and-wait journal delivery in origin sequence order, so ordinary reconnect replay should fill a transient gap. The diagnostic does not send a gap request, selectively retransmit, or change protocol messages. It cannot detect a missing tail event when no later sequence has arrived, and it cannot prove that the remote world applied received events. Inbox history is currently retained, which is required for this coverage calculation.
+
 ## Delivery requirements
 
 Outbound delivery, durable per-peer cursors, stop-and-wait retry, and reconnect replay are now implemented. Heartbeat/liveness messages and a basic PONG counter are implemented. Remaining transport work includes broader operational metrics, configurable rate limits, and fault-injection coverage. The optional application service applies winning events on the Paper main thread. It does not force-load chunks, disables block physics, and leaves events pending when their world or chunk is unavailable. It must not trust a peer merely because it can reach the TCP port.
