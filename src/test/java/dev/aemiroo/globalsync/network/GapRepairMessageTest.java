@@ -76,7 +76,7 @@ class GapRepairMessageTest {
     }
 
     private static ReplicationEnvelope event() {
-        return new ReplicationEnvelope(2, UUID.fromString("9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1"),
+        return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.fromString("9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1"),
                 "world", "node-eu", 4, Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE",
                 Map.of("player_uuid", "d6a9b5df-1b1d-4b17-9f45-9f9b9f1b7d11",
                         "x", "12", "y", "64", "z", "-4",
