@@ -16,20 +16,33 @@ public final class ReplicationMessageHandler {
     private final Set<String> sharedWorlds;
     private final LogicalClock logicalClock;
     private final Consumer<ReplicationEnvelope> applyRequest;
+    private final PeerMessageRateLimiter rateLimiter;
 
     public ReplicationMessageHandler(SqliteReceivedEventStore receivedEvents, Set<String> sharedWorlds) {
-        this(receivedEvents, sharedWorlds, null, ignored -> { });
+        this(receivedEvents, sharedWorlds, null, ignored -> { }, PeerMessageRateLimiter.defaults());
     }
 
     public ReplicationMessageHandler(SqliteReceivedEventStore receivedEvents, Set<String> sharedWorlds,
             LogicalClock logicalClock, Consumer<ReplicationEnvelope> applyRequest) {
+        this(receivedEvents, sharedWorlds, logicalClock, applyRequest, PeerMessageRateLimiter.defaults());
+    }
+
+    public ReplicationMessageHandler(SqliteReceivedEventStore receivedEvents, Set<String> sharedWorlds,
+            LogicalClock logicalClock, Consumer<ReplicationEnvelope> applyRequest,
+            PeerMessageRateLimiter rateLimiter) {
         this.receivedEvents = java.util.Objects.requireNonNull(receivedEvents, "receivedEvents");
         this.sharedWorlds = Set.copyOf(sharedWorlds);
         this.logicalClock = logicalClock;
         this.applyRequest = java.util.Objects.requireNonNull(applyRequest, "applyRequest");
+        this.rateLimiter = java.util.Objects.requireNonNull(rateLimiter, "rateLimiter");
     }
 
     public byte[] handle(byte[] payload, String authenticatedPeerId) throws IOException {
+        if (payload == null || authenticatedPeerId == null || authenticatedPeerId.isBlank())
+            throw new IOException("Missing replication payload or authenticated peer identity");
+        if (!rateLimiter.tryAcquire(authenticatedPeerId, payload.length))
+            throw new IOException("Authenticated peer exceeded the inbound replication rate limit");
+
         ReplicationEnvelope event = ReplicationMessageCodec.decodeEvent(payload, authenticatedPeerId, sharedWorlds);
         try {
             // Advance before accepting so a local edit racing with this receive

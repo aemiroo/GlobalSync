@@ -27,6 +27,7 @@ Implemented so far:
 - Client-side hostname verification and a strict HELLO/READY nonce handshake.
 - Bounded peer connection workers, handshake timeouts, and socket cleanup.
 - Bounded length-prefixed framing (1 MiB maximum).
+- Per-peer inbound token buckets limit both event count and payload bytes before JSON parsing or SQLite work.
 - Strict version-2 inbound `EVENT` allowlist for `BLOCK_PLACE` and `BLOCK_BREAK`.
 - Lamport logical clocks persisted with local and received events; concurrent edits use server ID and origin sequence as deterministic tie-breakers.
 - Durable per-block winner records and pending/applied/superseded inbox states.

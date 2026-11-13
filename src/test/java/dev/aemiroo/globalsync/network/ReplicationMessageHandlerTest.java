@@ -94,6 +94,21 @@ class ReplicationMessageHandlerTest {
         }
     }
 
+    @Test
+    void rejectsPeerFloodBeforeWritingToTheInbox() throws Exception {
+        try (SqliteReceivedEventStore journal = new SqliteReceivedEventStore(directory.resolve("limited.db"))) {
+            PeerMessageRateLimiter limiter = new PeerMessageRateLimiter(
+                    4, 1.0, 1.0, 10_000.0, 20_000.0);
+            ReplicationMessageHandler handler = new ReplicationMessageHandler(
+                    journal, Set.of("world"), null, ignored -> { }, limiter);
+            byte[] payload = ReplicationMessageCodec.encodeEvent(event());
+
+            ReplicationMessageCodec.validateAck(handler.handle(payload, "region-eu"), event().eventId());
+            assertThrows(java.io.IOException.class, () -> handler.handle(payload, "region-eu"));
+            assertEquals(1, journal.size(), "rate-limited frames must not reach durable inbox storage");
+        }
+    }
+
     private static ReplicationEnvelope event() {
         return new ReplicationEnvelope(ReplicationEnvelope.CURRENT_PROTOCOL_VERSION, UUID.fromString("9eec1f2d-c8d8-4c85-92d9-4a6e3baf01b1"),
                 "world", "region-eu", 1, Instant.parse("2026-11-13T00:00:00Z"), "BLOCK_PLACE",
