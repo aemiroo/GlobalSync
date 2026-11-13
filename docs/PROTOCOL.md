@@ -136,3 +136,14 @@ Protocol-v2 snapshot transfer frames are defined by `SnapshotTransferMessage`. T
 Snapshot transfer is not a new trust channel. Future dispatch must occur only after the existing mutually authenticated TLS and pinned-certificate peer handshake. The offer's source server ID must equal the authenticated peer ID, and its world must be present in the local shared-world allowlist. The manifest then binds the payload length, SHA-256, snapshot ID, format, and applied-through vector. Chunk processing must match the active request and snapshot IDs and enforce the exact chunk count and byte length derived from the manifest.
 
 This commit adds the strict wire codec and validation primitives only. It does not connect a transfer handler to live peer sessions or enable file transfer. No remote path, command, plugin, or configuration operation is represented by these message types. See [SNAPSHOTS.md](SNAPSHOTS.md) for the security and lifecycle boundary.
+
+
+## Snapshot receiver handling
+
+Snapshot-transfer frames are dispatched only after an authenticated peer session is established. The receiver binds an OFFER to the authenticated peer ID and configured shared-world allowlist, then binds all subsequent chunks and FINISH to the exact active request and snapshot UUIDs. Snapshot frames have a separate bounded per-peer rate limiter.
+
+The receiver accepts only OFFER, CHUNK, and FINISH as inbound sender messages. ACCEPT, REJECT, CHUNK_ACK, and COMPLETE received in that direction are protocol violations. An offer that fails authorization is rejected with a fixed reason; malformed frames, identity mismatches, illegal state transitions, or mismatched request/snapshot IDs fail the session closed.
+
+CHUNK_ACK is written only after the staged bytes have been forced to disk and the contiguous progress record has committed. Duplicate chunks below the committed index are acknowledged only when their bytes exactly match the staged content. FINISH produces COMPLETE only after exact byte length, expected chunk count, and SHA-256 verification. This completion signal is not a world-installation acknowledgement.
+
+The staging receiver uses a locally fixed directory and UUID-derived filenames. No protocol field can name a filesystem path or cause a remote file operation. The staging quota is 512 MiB per snapshot, four active transfers globally, one active transfer per peer, and 1 GiB total reserved storage. See [SNAPSHOTS.md](SNAPSHOTS.md) for restart recovery and retention behavior. The sender and snapshot installation are not yet implemented.
