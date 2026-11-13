@@ -29,13 +29,18 @@ public final class PeerControlMessage {
     }
 
     public static boolean isControl(byte[] payload) throws IOException {
-        JsonObject json = parse(payload);
-        String type = json.get("type").getAsString();
+        JsonObject json = parse(payload, FrameCodec.DEFAULT_MAX_FRAME_BYTES);
+        var typeElement = json.get("type");
+        if (typeElement == null || !typeElement.isJsonPrimitive()
+                || !typeElement.getAsJsonPrimitive().isString()) return false;
+        String type = typeElement.getAsString();
         return "PING".equals(type) || "PONG".equals(type);
     }
 
     public static Message decode(byte[] payload) throws IOException {
-        JsonObject json = parse(payload);
+        if (payload == null || payload.length > 256)
+            throw new IOException("Invalid peer control frame size");
+        JsonObject json = parse(payload, 256);
         if (!json.keySet().equals(FIELDS) || !json.get("type").isJsonPrimitive()
                 || !json.get("type").getAsJsonPrimitive().isString()
                 || !json.get("protocolVersion").isJsonPrimitive()
@@ -60,8 +65,8 @@ public final class PeerControlMessage {
         }
     }
 
-    private static JsonObject parse(byte[] payload) throws IOException {
-        if (payload == null || payload.length < 2 || payload.length > 256)
+    private static JsonObject parse(byte[] payload, int maxBytes) throws IOException {
+        if (payload == null || payload.length < 2 || payload.length > maxBytes)
             throw new IOException("Invalid peer control frame size");
         try {
             String text = StandardCharsets.UTF_8.newDecoder()
