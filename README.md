@@ -38,6 +38,8 @@ Implemented so far:
 - Bidirectional stop-and-wait delivery from each node's local journal, with one outstanding event per peer.
 - Per-peer local journal acknowledgement cursors persisted in SQLite and resumed after restart.
 - Bounded exponential reconnect attempts; timed-out sends are retried and safely deduplicated by the receiver.
+- Nonce-validated PING/PONG heartbeats detect half-open or unresponsive peer sessions and trigger reconnect after a missed response deadline.
+- Separate bounded rate limiting for heartbeat control frames.
 - A status command and Maven/GitHub Actions verification workflow.
 
 Authenticated peers exchange allowlisted block-edit events in both directions. Each sender advances its durable per-peer cursor only after receiving an ACK for the exact event; the receiver sends that ACK only after committing the event and its per-block winner decision. A disconnect or lost ACK causes replay from the last persisted cursor. When `application.enabled` is enabled, winning remote edits are applied on Paper's main thread. Events for unloaded chunks remain pending and are retried when the chunk is loaded.
@@ -46,7 +48,7 @@ Not implemented yet:
 
 - Capture of environmental changes, block entities, containers, and other non-player mutations.
 - Global consensus, partition fencing, and snapshot-based replica repair.
-- Heartbeat/liveness messages and peer health metrics.
+- Expanded peer health metrics and configurable rate limits.
 - Chunk snapshots, entity simulation, and remote player rendering.
 - Global chat, cross-region damage, PvP, or KnockbackSync integration.
 
