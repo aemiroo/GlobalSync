@@ -278,7 +278,7 @@ class PeerConnectionManagerIntegrationTest {
                     try {
                         return inboxB.size() == 3
                                 && receiverInbox.firstMissingSequenceForOrigin("a-region") == 0;
-                    } catch (IOException exception) {
+                    } catch (IOException | SQLException exception) {
                         return false;
                     }
                 }, 10, TimeUnit.SECONDS), "the receiver should request and durably accept the missing sequence");
