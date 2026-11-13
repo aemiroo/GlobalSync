@@ -106,25 +106,26 @@ public final class SqliteReceivedEventStore implements AutoCloseable {
         try {
             connection.setAutoCommit(false);
             try (PreparedStatement query = connection.prepareStatement("""
-                    SELECT receipt_offset, payload_json, status FROM received_events
+                    SELECT receipt_offset, payload_json FROM received_events
                     WHERE event_id = ? OR (origin_server_id = ? AND origin_sequence = ?)
-                    LIMIT 1
                     """)) {
                 query.setString(1, event.eventId().toString());
                 query.setString(2, event.originServerId());
                 query.setLong(3, event.sequence());
                 try (ResultSet result = query.executeQuery()) {
-                    if (result.next()) {
-                        long offset = result.getLong("receipt_offset");
-                        String existing = result.getString("payload_json");
-                        if (!existing.equals(payload)) {
+                    Long duplicateOffset = null;
+                    while (result.next()) {
+                        if (!payload.equals(result.getString("payload_json")) || duplicateOffset != null) {
                             throw new JournalConflictException(
                                     "Received event ID or origin sequence was reused for different data");
                         }
+                        duplicateOffset = result.getLong("receipt_offset");
+                    }
+                    if (duplicateOffset != null) {
                         updateLamportClock(event.logicalClock());
                         boolean apply = isPendingWinner(event.eventId());
                         connection.commit();
-                        return new ReceivedEventReceipt(offset, true, apply);
+                        return new ReceivedEventReceipt(duplicateOffset, true, apply);
                     }
                 }
             }
