@@ -103,3 +103,12 @@ Records must be strictly sorted by ascending `x`, then `y`, then `z`. Duplicate 
 The codec is streaming: it does not buffer the entire payload, close caller-owned streams, load classes, deserialize Java objects, or interpret paths. It validates strict UTF-8 and rejects malformed headers, unsupported versions, invalid record counts, unsorted or duplicate coordinates, malformed BlockData, truncated records, and trailing data. The writer reports the exact emitted byte length so a caller can compute the manifest length and digest while writing to a temporary file.
 
 This defines the bytes represented by `PAPER_BLOCK_DATA_V1`; it does **not** implement a Paper world capture. A future capture service must obtain records from Bukkit/Paper safely on the server thread, avoid force-loading chunks, define which loaded/known chunks are in scope, and coordinate its event watermark with actual applied world state. No snapshot manifest should be produced until that capture boundary can be proven coherent.
+
+
+## Durable world-local applied coverage
+
+The inbound SQLite store persists each event's world-local sequence separately from its per-origin delivery sequence. A sequence is included in snapshot coverage only after the winning event's Paper-thread mutation succeeds and its inbox status is durably changed to `APPLIED`.
+
+Coverage is reported independently for each `(world_id, origin_server_id)` pair. The contiguous watermark advances only across a gap-free prefix beginning at world-local sequence 1; received, pending, and superseded events do not advance it. The store enforces uniqueness of positive world-local sequence values within each world and origin.
+
+Rows created before this migration receive `world_sequence = 0`. Their historical world-local order cannot be reconstructed safely from the global delivery sequence, so they are deliberately excluded from snapshot coverage. A zero watermark means no positive sequence prefix is proven applied. This conservative rule may delay snapshot eligibility, but it avoids claiming coverage for changes that may not exist in the live world.
